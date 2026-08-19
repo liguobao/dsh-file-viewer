@@ -77,9 +77,9 @@ Relevant slots for a file viewer (verified in the installed types):
 
 | Slot | Kind | Scope | Use for us |
 |---|---|---|---|
-| `shell.overlay` | list | root | the FileViewer full-frame panel (click-through layer; additive) |
-| `sidebar.footer.action` | list | root | "Files" button opening the viewer (owner share: `{ wide }`) |
+| `shell.overlay` | list | root | the right-docked viewer column (click-through layer; the panel is additive) |
 | `conversation.chat.turnTail` | chain | session | produced-file chips → open in viewer (occupied by ui-deliverables at priority 0; chain = ascending priority, first non-null `select` wins, so priority -1 replaces it intentionally) |
+| workspace "…" menu | — | — | NOT a slot: ui-workspace's row menu is hardcoded → minimal patch script adds a "浏览文件" item (see §2.3) |
 | `settings.plugin.item` | keyed | root | settings card (P2) |
 
 Other shares: `locale.register(ns, {zh, en})` + `locale.bind(ns)` for i18n;
@@ -175,15 +175,23 @@ reject otherwise (`bad-request` / `internal` codes, message-carrying).
 - **Services injected**: `['connection', 'slots', 'locale', 'sessions', 'workspaces']`.
 - **`ctx.provide('fileViewer', api)`** — `api.openFile(path, { line?, renderer? })`
   (+ `stat`, `readRange`, `readHead`, `list`) — the public plugin API.
-- **`shell.overlay` entry** (`id: 'dsh-file-viewer'`): the FileViewer panel —
-  toolbar (name / type / size / Refresh / Open externally / Copy path /
-  Close), body (active renderer inside an error boundary; browse mode uses
-  `workspaces.listDirectory`), status bar (encoding, size, mtime, line info).
-- **`sidebar.footer.action` entry**: "Files" button → opens the panel in
-  browse mode.
+- **`shell.overlay` entry** (`id: 'dsh-file-viewer'`): a **right-docked
+  viewer column** mirroring the Harness details panel (border-left on
+  `--dsw-alias-border-l1`, Harness toolbar/statusbar proportions) — toolbar
+  (name / type / size / Refresh / Open externally / Copy path / Close), body
+  (active renderer inside an error boundary; browse mode lists through the
+  boundary-checked `/fileviewer` RPC, starting at the workspace root), status
+  bar (encoding, size, mtime, line info). Closed with Esc or the close button;
+  the layer stays click-through so the app underneath remains usable.
+- **Workspace "…" menu entry**: ui-workspace's row menu
+  (`ProjectRowItem` → `workspaceMenuItems`) has no slot hook, so
+  `scripts/patch-workspace-menu.mjs` applies three guarded, idempotent edits
+  to the installed bundle: a `browseFiles` menu item, an `onSelect` branch
+  calling `window.__dsfvBrowseWorkspace(workspaceId)` (installed by this
+  plugin's client), and zh/en dictionary keys. Version drift aborts loudly.
 - **`conversation.chat.turnTail` chain entry** (priority -1): produced-file
   chips (from the turn's `deliverables` location data) whose click opens the
-  DSH File Viewer instead of the OS. Replaces ui-deliverables' chips
+  docked DSH File Viewer instead of the OS. Replaces ui-deliverables' chips
   deliberately (the viewer is the intended destination).
 - **Large-file strategy** (core/large-file.ts):
   - `< 5 MB` normal — whole-file read.

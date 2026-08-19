@@ -5,8 +5,11 @@
  * module-table require (react + the injected @deepseek-ai seeds). The bundle
  * provides:
  *   - the `fileViewer` service (ctx.get('fileViewer')) → openFile(path, opts)
- *   - a `shell.overlay` entry rendering the viewer panel
- *   - a `sidebar.footer.action` entry opening the panel in browse mode
+ *   - a `shell.overlay` entry rendering a right-docked viewer column (mirrors
+ *     the Harness details panel; opened from produced-file chips or the
+ *     workspace "…" menu "浏览文件" entry)
+ *   - `window.__dsfvBrowseWorkspace(workspaceIdOrPath)` — the bridge the
+ *     patched workspace menu calls (scripts/patch-workspace-menu.mjs)
  *   - a `conversation.chat.turnTail` chain entry (priority -1) rendering
  *     produced-file chips that open the viewer
  *
@@ -59,6 +62,8 @@ declare global {
     __ModuleLoader__: {
       load(input: { id: string; factory: (require: (id: string) => unknown) => unknown }): void
     }
+    /** Installed by the workspace-row menu patch (scripts/patch-workspace-menu.mjs). */
+    __dsfvBrowseWorkspace?: (workspaceIdOrPath: string) => void
   }
 }
 
@@ -130,6 +135,7 @@ window.__ModuleLoader__.load({
       panelTitle: '文件查看器',
       openFile: '打开 {name}',
       browse: '浏览',
+      browseFiles: '浏览文件',
       refresh: '刷新',
       openExternal: '在外部打开',
       revealInExplorer: '在资源管理器中显示',
@@ -207,6 +213,7 @@ window.__ModuleLoader__.load({
     const en: Record<keyof typeof zh, string> = {
       panelTitle: 'File Viewer',
       openFile: 'Open {name}',
+      browseFiles: 'Browse files',
       browse: 'Browse',
       refresh: 'Refresh',
       openExternal: 'Open externally',
@@ -591,7 +598,7 @@ window.__ModuleLoader__.load({
 
       return React.createElement(
         'div',
-        { className: 'dsfv-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('panelTitle'), onMouseDown: (event: MouseEvent) => { if (event.target === event.currentTarget) close() } },
+        { className: 'dsfv-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('panelTitle') },
         React.createElement(
           'section',
           { className: 'dsfv-panel' },
@@ -2020,51 +2027,32 @@ window.__ModuleLoader__.load({
     }
 
     // -----------------------------------------------------------------------
-    // Sidebar footer action
-    // -----------------------------------------------------------------------
-    function FileViewerSidebarAction(props: { wide: boolean; api: FileViewerApi; t: Translate }): React.ReactNode {
-      const { wide, api, t } = props
-      return React.createElement(
-        'button',
-        {
-          type: 'button',
-          className: `dsfv-sidebar-action${wide ? ' isWide' : ' isRail'}`,
-          title: t('panelTitle'),
-          'aria-label': t('panelTitle'),
-          onClick: () => viewerStore.set({ open: true, mode: 'browse', browsePath: null, browseEntries: null, browseError: null, file: null, error: null, loading: false }),
-        },
-        React.createElement('svg', { viewBox: '0 0 24 24', className: 'dsfv-sidebar-icon', 'aria-hidden': true },
-          React.createElement('path', { d: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinejoin: 'round' }),
-          React.createElement('path', { d: 'M3 12h18', stroke: 'currentColor', strokeWidth: 1.7 })),
-        wide ? React.createElement('span', { className: 'dsfv-sidebar-label' }, t('panelTitle')) : null,
-      )
-    }
-
-    // -----------------------------------------------------------------------
-    // Styles (theme tokens — automatic light/dark)
+    // Styles (theme tokens — automatic light/dark, Harness-native surfaces)
     // -----------------------------------------------------------------------
     function installStyle(): () => void {
       const css = [
-        '.dsfv-overlay{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.4));pointer-events:auto;font-family:var(--dsw-font-family,inherit)}',
-        '.dsfv-panel{display:flex;flex-direction:column;width:min(1100px,92vw);height:min(720px,86vh);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.3)}',
-        '.dsfv-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;border-bottom:1px solid var(--dsw-alias-border-l1);flex:none}',
-        '.dsfv-toolbar-file{display:flex;align-items:center;gap:10px;min-width:0}',
-        '.dsfv-filename{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px}',
+        // Right-docked viewer column (mirrors the Harness details panel).
+        '.dsfv-overlay{position:fixed;inset:0;z-index:200;pointer-events:none;display:flex;justify-content:flex-end;font-family:var(--dsw-font-family,inherit)}',
+        '.dsfv-panel{pointer-events:auto;display:flex;flex-direction:column;width:min(720px,72vw);height:100%;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border-left:1px solid var(--dsw-alias-border-l1);overflow:hidden}',
+        '.dsfv-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;border-bottom:1px solid var(--dsw-alias-border-l1);flex:none}',
+        '.dsfv-toolbar-file{display:flex;align-items:baseline;gap:10px;min-width:0}',
+        '.dsfv-filename{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px}',
         '.dsfv-meta{font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}',
         '.dsfv-muted{color:var(--dsw-alias-label-tertiary)}',
-        '.dsfv-toolbar-actions{display:flex;align-items:center;gap:6px;flex:none}',
-        '.dsfv-toolbar-btn{font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid transparent;border-radius:6px;padding:4px 10px;cursor:pointer;white-space:nowrap}',
-        '.dsfv-toolbar-btn:hover{color:var(--dsw-alias-label-primary)}',
-        '.dsfv-toolbar-btn.isPrimary{background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-inverse)}',
+        '.dsfv-toolbar-actions{display:flex;align-items:center;gap:4px;flex:none}',
+        '.dsfv-toolbar-btn{font:inherit;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary);background:transparent;border:none;border-radius:6px;padding:3px 8px;cursor:pointer;white-space:nowrap}',
+        '.dsfv-toolbar-btn:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}',
+        '.dsfv-toolbar-btn.isPrimary{color:var(--dsw-alias-label-inverse);background:var(--dsw-alias-button-primary-fill)}',
+        '.dsfv-toolbar-btn.isPrimary:hover{color:var(--dsw-alias-label-inverse);background:var(--dsw-alias-button-primary-hover)}',
         '.dsfv-toolbar-btn:disabled{opacity:.5;cursor:default}',
-        '.dsfv-icon-btn{font:inherit;font-size:13px;line-height:1;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid transparent;border-radius:6px;padding:5px 8px;cursor:pointer}',
-        '.dsfv-icon-btn:hover{color:var(--dsw-alias-label-primary)}',
+        '.dsfv-icon-btn{font:inherit;font-size:13px;line-height:1;color:var(--dsw-alias-label-secondary);background:transparent;border:none;border-radius:6px;padding:5px 7px;cursor:pointer}',
+        '.dsfv-icon-btn:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}',
         '.dsfv-icon-btn:disabled{opacity:.5;cursor:default}',
         '.dsfv-body{flex:1;min-height:0;display:flex;flex-direction:column}',
         '.dsfv-renderer{flex:1;min-height:0;display:flex;flex-direction:column}',
         '.dsfv-renderer-stack{flex:1;min-height:0;display:flex;flex-direction:column}',
-        '.dsfv-subtoolbar{display:flex;align-items:center;gap:6px;padding:6px 12px;border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;flex-wrap:wrap}',
-        '.dsfv-statusbar{display:flex;align-items:center;gap:16px;padding:5px 12px;border-top:1px solid var(--dsw-alias-border-l1);font-size:11px;color:var(--dsw-alias-label-tertiary);flex:none}',
+        '.dsfv-subtoolbar{display:flex;align-items:center;gap:8px;padding:6px 14px;border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;flex-wrap:wrap;min-height:34px}',
+        '.dsfv-statusbar{display:flex;align-items:center;gap:16px;padding:5px 14px;border-top:1px solid var(--dsw-alias-border-l1);font-size:12px;color:var(--dsw-alias-label-tertiary);flex:none}',
         '.dsfv-status-extra{margin-left:auto;color:var(--dsw-alias-label-secondary)}',
         '.dsfv-center{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--dsw-alias-label-secondary);padding:24px;text-align:center}',
         '.dsfv-empty p{color:var(--dsw-alias-label-tertiary);max-width:420px}',
@@ -2146,11 +2134,6 @@ window.__ModuleLoader__.load({
         '.dsfv-produced-chip:hover{color:var(--dsw-alias-label-primary);text-decoration:underline}',
         '.dsfv-produced-folder{font:inherit;font-size:12px;color:var(--dsw-alias-label-tertiary);background:none;border:none;padding:2px 4px;cursor:pointer}',
         '.dsfv-produced-folder:hover{color:var(--dsw-alias-label-secondary);text-decoration:underline}',
-        '.dsfv-sidebar-action{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;border:none;background:none;color:var(--dsw-alias-label-secondary);cursor:pointer;font:inherit;font-size:13px;text-align:left;border-radius:6px}',
-        '.dsfv-sidebar-action:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}',
-        '.dsfv-sidebar-icon{width:18px;height:18px;flex:none}',
-        '.dsfv-sidebar-label{white-space:nowrap}',
-        '.dsfv-sidebar-action.isRail{justify-content:center;padding:8px}',
         '.dsfv-line-gutter .dsfv-gutter-line{font-size:inherit}',
       ].join('')
       const style = document.createElement('style')
@@ -2174,6 +2157,19 @@ window.__ModuleLoader__.load({
       const sessions = ctx.get<SessionsLike>('sessions')
       const api = createApi(ctx, sessions)
 
+      // Bridge for the workspace-row "浏览" menu item (patched into
+      // dsh-client-ui-workspace by scripts/patch-workspace-menu.mjs): the
+      // patched handler passes a workspace id (or, as a fallback, an absolute
+      // path) and we open the docked viewer rooted at that directory.
+      window.__dsfvBrowseWorkspace = (workspaceIdOrPath: string): void => {
+        const workspaces = ctx.get<{ list: { getSnapshot(): { items: Array<{ workspaceId: string; path: string }> } } }>('workspaces')
+        const items = workspaces?.list.getSnapshot().items ?? []
+        const match = items.find((workspace) => workspace.workspaceId === workspaceIdOrPath)
+        const path = match?.path ?? (workspaceIdOrPath.startsWith('/') ? workspaceIdOrPath : undefined)
+        if (path === undefined) return
+        viewerStore.set({ open: true, mode: 'browse', browsePath: path, browseEntries: null, browseError: null, file: null, error: null, loading: false, status: '', binary: false })
+      }
+
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-file-viewer: dictionaries')
       ctx.effect(installStyle, 'dsh-file-viewer: client styles')
 
@@ -2193,14 +2189,6 @@ window.__ModuleLoader__.load({
         locale: NS,
         inject: () => ({ api }),
       }, FileViewerPanel))
-
-      ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
-        name: 'sidebar.footer.action',
-        id: 'dsh-file-viewer',
-        order: -30,
-        locale: NS,
-        inject: () => ({ api }),
-      }, FileViewerSidebarAction))
 
       ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
         name: 'conversation.chat.turnTail',

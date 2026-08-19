@@ -30,15 +30,26 @@ open and inspect files right inside the web UI — no external application neede
   traversal and symlink escapes are rejected.
 - **Client half** (`dist/client.js`) provides the `fileViewer` service
   (`ctx.get('fileViewer')` → `openFile(path, { line, renderer })`) and renders
-  a full-frame panel through the `shell.overlay` slot, a sidebar entry
-  (`sidebar.footer.action`), and produced-file chips in the conversation
-  (`conversation.chat.turnTail`) that open the viewer instead of the OS.
+  a **right-docked viewer column** (styled like the Harness details panel)
+  through the `shell.overlay` slot. It opens from:
+  - produced-file chips in the conversation (`conversation.chat.turnTail`,
+    priority -1 — clicking an agent-generated file previews it in-app), or
+  - the **"浏览文件 / Browse files"** entry added to each workspace row's
+    "…" menu (see the compatibility patch below).
+- **Workspace "…" menu patch** (`scripts/patch-workspace-menu.mjs`): the
+  workspace browser renders its row menu from a hardcoded list with no slot
+  hook, so this script applies three guarded, idempotent edits to the
+  installed `@deepseek-ai/dsh-client-ui-workspace` client bundle: a
+  `browseFiles` menu item (zh/en labels), an `onSelect` branch calling
+  `window.__dsfvBrowseWorkspace(workspaceId)`, and the two dictionary keys.
+  It aborts loudly on version drift and can be re-run safely after Harness
+  updates (`node scripts/patch-workspace-menu.mjs`).
 - **Large-file strategy**: `< 5 MB` whole-file, `5–50 MB` chunked streaming,
   `> 50 MB` head-only with explicit "Load more / Go to end" navigation. Range
   reads are capped (8 MiB per call) and text/CSV rows are windowed, so a
   500 MB log never lands in browser memory.
-- **Theming**: styles use `--dsw-alias-*` tokens, so light/dark follow the
-  Harness theme automatically.
+- **Theming**: styles use `--dsw-alias-*` tokens and match Harness's details
+  panel proportions, so light/dark follow the Harness theme automatically.
 
 ## Public API
 
@@ -84,12 +95,15 @@ npm test               # vitest: mime, renderer, paths, large-file, csv, json, f
 ```bash
 # from the repo root (the profile resolves relative specs from your cwd)
 dsh plugin --profile web add /path/to/dsh-file-viewer
+# compatibility patch: add "浏览文件" to each workspace's "…" menu
+node scripts/patch-workspace-menu.mjs
 # then restart the web service (preflight on 43124 → 43123), see
 # scripts/restart-dsh-web.sh for the safe pattern used in this repo.
 ```
 
 Client-only changes hot-reload via `dsh-client-hmr`; node-half changes need a
-web restart.
+web restart. Re-run `scripts/patch-workspace-menu.mjs` after any Harness
+update that reinstalls `@deepseek-ai/dsh-client-ui-workspace`.
 
 ## Security notes
 
