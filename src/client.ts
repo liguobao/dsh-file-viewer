@@ -1,0 +1,2218 @@
+/**
+ * dsh-file-viewer — client half (browser bundle).
+ *
+ * Registered via window.__ModuleLoader__.load; the factory receives the
+ * module-table require (react + the injected @deepseek-ai seeds). The bundle
+ * provides:
+ *   - the `fileViewer` service (ctx.get('fileViewer')) → openFile(path, opts)
+ *   - a `shell.overlay` entry rendering the viewer panel
+ *   - a `sidebar.footer.action` entry opening the panel in browse mode
+ *   - a `conversation.chat.turnTail` chain entry (priority -1) rendering
+ *     produced-file chips that open the viewer
+ *
+ * All pure logic lives in src/core (node-tested); this file only assembles
+ * React components over it.
+ */
+
+import { detectMime, looksBinary } from './core/mime.js'
+import { RendererRegistry, buildFileInfo, type FileInfo, type OpenOptions } from './core/renderer.js'
+import { initialLoadPlan, DEFAULT_CHUNK_BYTES, CSV_ROW_CAP } from './core/large-file.js'
+import { CsvStreamParser, detectDelimiter } from './core/csv.js'
+import { parseJson, scalarText } from './core/json.js'
+import { normalizeRequestPath } from './core/paths.js'
+import { basename, dirname, formatBytes, formatClock } from './core/format.js'
+import * as pdfjs from 'pdfjs-dist'
+// The PDF.js worker source is injected at build time (scripts/build.mjs) and
+// served from a Blob URL so the single client bundle needs no second file.
+declare const DSH_FILE_VIEWER_PDF_WORKER_SOURCE: string
+import MarkdownIt from 'markdown-it'
+import DOMPurify from 'dompurify'
+import hljs from 'highlight.js/lib/core'
+import javascript from 'highlight.js/lib/languages/javascript'
+import typescript from 'highlight.js/lib/languages/typescript'
+import python from 'highlight.js/lib/languages/python'
+import go from 'highlight.js/lib/languages/go'
+import rust from 'highlight.js/lib/languages/rust'
+import java from 'highlight.js/lib/languages/java'
+import c from 'highlight.js/lib/languages/c'
+import cpp from 'highlight.js/lib/languages/cpp'
+import csharp from 'highlight.js/lib/languages/csharp'
+import bash from 'highlight.js/lib/languages/bash'
+import powershell from 'highlight.js/lib/languages/powershell'
+import xml from 'highlight.js/lib/languages/xml'
+import css from 'highlight.js/lib/languages/css'
+import sql from 'highlight.js/lib/languages/sql'
+import r from 'highlight.js/lib/languages/r'
+import lua from 'highlight.js/lib/languages/lua'
+import ruby from 'highlight.js/lib/languages/ruby'
+import php from 'highlight.js/lib/languages/php'
+import jsonLang from 'highlight.js/lib/languages/json'
+import yaml from 'highlight.js/lib/languages/yaml'
+import markdown from 'highlight.js/lib/languages/markdown'
+import ini from 'highlight.js/lib/languages/ini'
+import diff from 'highlight.js/lib/languages/diff'
+import plaintext from 'highlight.js/lib/languages/plaintext'
+import { load as yamlLoad } from 'js-yaml'
+
+declare global {
+  interface Window {
+    __ModuleLoader__: {
+      load(input: { id: string; factory: (require: (id: string) => unknown) => unknown }): void
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Syntax-highlighting language table (curated; extended cheaply later).
+// ---------------------------------------------------------------------------
+hljs.registerLanguage('javascript', javascript)
+hljs.registerLanguage('typescript', typescript)
+hljs.registerLanguage('python', python)
+hljs.registerLanguage('go', go)
+hljs.registerLanguage('rust', rust)
+hljs.registerLanguage('java', java)
+hljs.registerLanguage('c', c)
+hljs.registerLanguage('cpp', cpp)
+hljs.registerLanguage('csharp', csharp)
+hljs.registerLanguage('bash', bash)
+hljs.registerLanguage('powershell', powershell)
+hljs.registerLanguage('xml', xml)
+hljs.registerLanguage('css', css)
+hljs.registerLanguage('sql', sql)
+hljs.registerLanguage('r', r)
+hljs.registerLanguage('lua', lua)
+hljs.registerLanguage('ruby', ruby)
+hljs.registerLanguage('php', php)
+hljs.registerLanguage('json', jsonLang)
+hljs.registerLanguage('yaml', yaml)
+hljs.registerLanguage('markdown', markdown)
+hljs.registerLanguage('ini', ini)
+hljs.registerLanguage('diff', diff)
+hljs.registerLanguage('plaintext', plaintext)
+
+const HLJS_LANG_BY_EXT: Record<string, string> = {
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
+  ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'typescript',
+  py: 'python', go: 'go', rs: 'rust', java: 'java', c: 'c', h: 'c',
+  cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', cs: 'csharp',
+  sh: 'bash', bash: 'bash', zsh: 'bash', ps1: 'powershell', psd1: 'powershell',
+  html: 'xml', htm: 'xml', xml: 'xml', css: 'css', scss: 'css', sql: 'sql',
+  r: 'r', lua: 'lua', rb: 'ruby', php: 'php', json: 'json', jsonl: 'json',
+  yaml: 'yaml', yml: 'yaml', md: 'markdown', markdown: 'markdown',
+  ini: 'ini', conf: 'ini', cfg: 'ini', diff: 'diff', patch: 'diff',
+  txt: 'plaintext', log: 'plaintext',
+}
+
+window.__ModuleLoader__.load({
+  id: 'dsh-file-viewer',
+  factory: (require) => {
+    const module = { exports: {} as Record<string, unknown> }
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const React = require('react') as typeof import('react')
+
+    // PDF worker: the bundle inlines the worker source and serves it from a
+    // Blob URL so the single client.js needs no second file.
+    try {
+      const workerBlob = new Blob([DSH_FILE_VIEWER_PDF_WORKER_SOURCE], { type: 'text/javascript' })
+      pdfjs.GlobalWorkerOptions.workerPort = new Worker(URL.createObjectURL(workerBlob), { type: 'module' })
+    } catch {
+      // Worker creation can fail under strict CSP; PDF rendering will then
+      // surface a readable error inside the renderer error boundary.
+    }
+
+    const inject = ['connection', 'slots', 'locale', 'sessions', 'workspaces']
+
+    // -----------------------------------------------------------------------
+    // Locales
+    // -----------------------------------------------------------------------
+    const NS = 'fileViewer'
+    const zh = {
+      panelTitle: '文件查看器',
+      openFile: '打开 {name}',
+      browse: '浏览',
+      refresh: '刷新',
+      openExternal: '在外部打开',
+      revealInExplorer: '在资源管理器中显示',
+      copyPath: '复制路径',
+      close: '关闭',
+      loading: '加载中…',
+      previewUnavailable: '无法预览',
+      filename: '文件名',
+      type: '类型',
+      size: '大小',
+      modified: '修改时间',
+      encoding: 'UTF-8',
+      noFileOpen: '没有打开的文件。点击 Agent 输出中的文件，或从侧栏打开“文件查看器”浏览工作目录。',
+      openAsText: '以文本打开',
+      openInBrowse: '打开文件浏览',
+      produced: '产物',
+      showInFolder: '在文件夹中显示',
+      fileChanged: '文件已在磁盘上更改。',
+      reload: '重新加载',
+      retry: '重试',
+      reason: '原因',
+      goUp: '上级目录',
+      directoryEmpty: '此目录为空。',
+      errorUnknown: '未知错误',
+      line: '行 {line}',
+      page: '页 {page}/{total}',
+      rowsLoaded: '已加载 {rows} 行',
+      loadMore: '加载更多',
+      showingRows: '显示 {shown} 行（文件共 {size}）',
+      fit: '适应窗口',
+      percent: '{percent}%',
+      reset: '重置',
+      zoomIn: '放大',
+      zoomOut: '缩小',
+      wordWrap: '自动换行',
+      fontSize: '字号',
+      search: '搜索',
+      searchResults: '{count} 个结果',
+      jumpToLine: '跳转到行',
+      goToEnd: '跳转到末尾',
+      nextChunk: '加载下一段',
+      sortAsc: '升序',
+      sortDesc: '降序',
+      tree: '树',
+      source: '源码',
+      preview: '预览',
+      expandAll: '全部展开',
+      collapseAll: '全部折叠',
+      copyValue: '复制值',
+      copyJsonPath: '复制路径',
+      firstChunk: '仅加载了文件开头。继续加载以查看更多内容。',
+      largeFileHint: '此文件为 {size}。为保持 DSH 响应，仅加载部分内容。',
+      pdfToolbar: 'PDF',
+      prevPage: '上一页',
+      nextPage: '下一页',
+      csvToolbar: 'CSV',
+      codeToolbar: '代码',
+      textToolbar: '文本',
+      markdownToolbar: 'Markdown',
+      jsonToolbar: 'JSON',
+      yamlToolbar: 'YAML',
+      imageToolbar: '图片',
+      imageDimensions: '{width} × {height}',
+      selectWorkspace: '选择要浏览的目录',
+      currentDirectory: '当前目录',
+      copy: '复制',
+      selectAll: '全选',
+      cancel: '取消',
+      loadingMore: '加载中…',
+      truncatedNotice: '行数过多，仅保留前 {count} 行。',
+      noSearchResults: '无匹配结果',
+      pdfInvalid: '无法预览此 PDF。',
+      openTextHint: '该文件看起来是二进制文件。仅在你确认它是文本时以文本打开。',
+    } as const
+    const en: Record<keyof typeof zh, string> = {
+      panelTitle: 'File Viewer',
+      openFile: 'Open {name}',
+      browse: 'Browse',
+      refresh: 'Refresh',
+      openExternal: 'Open externally',
+      revealInExplorer: 'Reveal in Explorer',
+      copyPath: 'Copy path',
+      close: 'Close',
+      loading: 'Loading…',
+      previewUnavailable: 'Preview unavailable',
+      filename: 'Filename',
+      type: 'Type',
+      size: 'Size',
+      modified: 'Modified',
+      encoding: 'UTF-8',
+      noFileOpen: 'No file open. Click a file in the agent output, or open "File Viewer" from the sidebar to browse the workspace.',
+      openAsText: 'Open as text',
+      openInBrowse: 'Open file browser',
+      produced: 'Produced',
+      showInFolder: 'Show in folder',
+      fileChanged: 'File changed on disk.',
+      reload: 'Reload',
+      retry: 'Retry',
+      reason: 'Reason',
+      goUp: 'Parent directory',
+      directoryEmpty: 'This directory is empty.',
+      errorUnknown: 'Unknown error',
+      line: 'Line {line}',
+      page: 'Page {page}/{total}',
+      rowsLoaded: '{rows} rows loaded',
+      loadMore: 'Load more',
+      showingRows: 'Showing {shown} rows · file {size}',
+      fit: 'Fit',
+      percent: '{percent}%',
+      reset: 'Reset',
+      zoomIn: 'Zoom in',
+      zoomOut: 'Zoom out',
+      wordWrap: 'Word wrap',
+      fontSize: 'Font size',
+      search: 'Search',
+      searchResults: '{count} results',
+      jumpToLine: 'Jump to line',
+      goToEnd: 'Go to end',
+      nextChunk: 'Load next chunk',
+      sortAsc: 'Ascending',
+      sortDesc: 'Descending',
+      tree: 'Tree',
+      source: 'Source',
+      preview: 'Preview',
+      expandAll: 'Expand all',
+      collapseAll: 'Collapse all',
+      copyValue: 'Copy value',
+      copyJsonPath: 'Copy path',
+      firstChunk: 'Only the beginning of the file was loaded. Load more to see the rest.',
+      largeFileHint: 'This file is {size}. Only part of the file will be loaded to keep DSH responsive.',
+      pdfToolbar: 'PDF',
+      prevPage: 'Previous page',
+      nextPage: 'Next page',
+      csvToolbar: 'CSV',
+      codeToolbar: 'Code',
+      textToolbar: 'Text',
+      markdownToolbar: 'Markdown',
+      jsonToolbar: 'JSON',
+      yamlToolbar: 'YAML',
+      imageToolbar: 'Image',
+      imageDimensions: '{width} × {height}',
+      selectWorkspace: 'Choose a directory to browse',
+      currentDirectory: 'Current directory',
+      copy: 'Copy',
+      selectAll: 'Select all',
+      cancel: 'Cancel',
+      loadingMore: 'Loading…',
+      truncatedNotice: 'Too many rows; only the first {count} are kept.',
+      noSearchResults: 'No matches',
+      pdfInvalid: 'Unable to preview this PDF.',
+      openTextHint: 'This file looks binary. Only open it as text if you are sure it is text.',
+    }
+    type Translate = (key: keyof typeof zh, params?: Record<string, string | number>) => string
+
+    // -----------------------------------------------------------------------
+    // Tiny external store
+    // -----------------------------------------------------------------------
+    function createStore<S>(initial: S): {
+      get(): S
+      set(patch: Partial<S> | ((state: S) => Partial<S>)): void
+      subscribe(listener: () => void): () => void
+    } {
+      let state = initial
+      const listeners = new Set<() => void>()
+      return {
+        get: () => state,
+        set: (patch) => {
+          state = { ...state, ...(typeof patch === 'function' ? patch(state) : patch) }
+          for (const listener of listeners) listener()
+        },
+        subscribe: (listener) => {
+          listeners.add(listener)
+          return () => { listeners.delete(listener) }
+        },
+      }
+    }
+
+    interface ViewerState {
+      open: boolean
+      mode: 'idle' | 'browse' | 'file'
+      file: FileInfo | null
+      options: OpenOptions
+      status: string
+      error: string | null
+      loading: boolean
+      reloadNonce: number
+      /** Whether the sniffed head marks the file as binary (NUL bytes). */
+      binary: boolean
+      browsePath: string | null
+      browseEntries: Array<{ name: string; path: string; isDirectory: boolean; size?: number; mtimeMs?: number }> | null
+      browseError: string | null
+    }
+
+    const viewerStore = createStore<ViewerState>({
+      open: false,
+      mode: 'idle',
+      file: null,
+      options: {},
+      status: '',
+      error: null,
+      loading: false,
+      reloadNonce: 0,
+      binary: false,
+      browsePath: null,
+      browseEntries: null,
+      browseError: null,
+    })
+
+    function useViewerState(): ViewerState {
+      return React.useSyncExternalStore(viewerStore.subscribe, viewerStore.get)
+    }
+
+    // -----------------------------------------------------------------------
+    // RPC client + public API
+    // -----------------------------------------------------------------------
+    interface RpcResultLike { ok: boolean; value?: unknown; error?: { message?: string } }
+    interface HostCtxLike {
+      connection: { rpc: { call(channel: string, endpoint: string, payload: unknown): Promise<RpcResultLike> } }
+      effect(effect: () => (() => void) | void, label: string): void
+      locale: {
+        bind(namespace: string): Translate
+        register(namespace: string, dictionaries: { zh: typeof zh; en: typeof en }): () => void
+      }
+      slots: {
+        inject(name: string, factory: () => unknown): void
+        register(options: Record<string, unknown>, component: unknown): unknown
+      }
+      provide(name: string, value: unknown): void
+      get<T = unknown>(name: string): T | undefined
+      logger: { warn(message: string): void; error(message: string): void }
+    }
+    interface SessionsLike {
+      list: { getSnapshot(): { byId?: Record<string, { cwd?: string } | undefined>; current?: string } }
+    }
+
+    function resolveWorkspacePath(cwd: string | undefined, path: string): string {
+      if (path.startsWith('/') || /^[A-Za-z]:[/\\]/.test(path) || path.startsWith('\\\\')) return path
+      if (cwd === undefined || cwd === '') return path
+      return `${cwd.replace(/[/\\]+$/, '')}/${path.replace(/^[/\\]+/, '')}`
+    }
+
+    function decodeBase64(base64: string): Uint8Array {
+      const binary = atob(base64)
+      const bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+      return bytes
+    }
+
+    function bytesToBase64(bytes: Uint8Array): string {
+      let binary = ''
+      const chunk = 0x8000
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+      }
+      return btoa(binary)
+    }
+
+    function messageOf(reason: unknown): string {
+      return reason instanceof Error ? reason.message : String(reason)
+    }
+
+    function isPendingControlRoute(reason: unknown): boolean {
+      return reason instanceof Error && /transport failure for \/fileviewer\/[^:]+: HTTP 405$/.test(reason.message)
+    }
+
+    function delay(ms: number): Promise<void> {
+      return new Promise((resolve) => window.setTimeout(resolve, ms))
+    }
+
+    interface FileViewerApi {
+      openFile(path: string, options?: OpenOptions): void
+      stat(path: string): Promise<{ path: string; name: string; ext: string; mime: string; size: number; mtimeMs?: number; isDirectory: boolean; exists: boolean }>
+      readRange(path: string, offset: number, length: number): Promise<{ data: string; offset: number; size: number; eof: boolean }>
+      readHead(path: string, maxBytes: number): Promise<{ data: string; size: number; truncated: boolean }>
+      list(path: string): Promise<{ path: string; entries: Array<{ name: string; path: string; isDirectory: boolean; size?: number; mtimeMs?: number }> }>
+      openExternal(path: string): Promise<{ opened: true }>
+      dataUrl(path: string, mime: string): Promise<string>
+    }
+
+    function createApi(ctx: HostCtxLike, sessions: SessionsLike | undefined): FileViewerApi {
+      const rpcCall = async <T,>(endpoint: string, payload: Record<string, unknown>): Promise<T> => {
+        let result: RpcResultLike
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            result = await ctx.connection.rpc.call('/fileviewer', endpoint, payload)
+            break
+          } catch (reason) {
+            if (attempt >= 19 || !isPendingControlRoute(reason)) throw reason
+            await delay(100)
+          }
+        }
+        if (!result.ok) throw new Error(result.error?.message ?? 'File Viewer request failed.')
+        return result.value as T
+      }
+
+      const currentCwd = (): string | undefined => {
+        const snapshot = sessions?.list.getSnapshot()
+        return snapshot?.byId === undefined ? undefined : Object.values(snapshot.byId).find((session) => session?.cwd !== undefined)?.cwd
+      }
+
+      const openFile = (rawPath: string, options: OpenOptions = {}): void => {
+        let path: string
+        try {
+          path = resolveWorkspacePath(currentCwd(), normalizeRequestPath(rawPath))
+        } catch (error) {
+          viewerStore.set({ open: true, mode: 'file', file: null, options: {}, status: '', error: messageOf(error), loading: false, binary: false, reloadNonce: viewerStore.get().reloadNonce + 1 })
+          return
+        }
+        viewerStore.set({ open: true, mode: 'file', file: null, options, status: '', error: null, loading: true, binary: false, reloadNonce: viewerStore.get().reloadNonce + 1, browsePath: null, browseEntries: null })
+        void loadFile(path, options)
+      }
+
+      const loadFile = async (path: string, options: OpenOptions): Promise<void> => {
+        try {
+          const [meta, head] = await Promise.all([
+            rpcCall<{ path: string; name: string; ext: string; mime: string; size: number; mtimeMs?: number; isDirectory: boolean; exists: boolean }>('stat', { path }),
+            rpcCall<{ data: string; size: number; truncated: boolean }>('readHead', { path, maxBytes: 4096 }).catch(() => ({ data: '', size: 0, truncated: false })),
+          ])
+          if (!meta.exists) throw new Error('The file does not exist.')
+          const headBytes = head.data !== '' ? decodeBase64(head.data) : undefined
+          const file: FileInfo = buildFileInfo({
+            path: meta.path,
+            name: meta.name,
+            ext: meta.ext,
+            size: meta.size,
+            mtimeMs: meta.mtimeMs,
+            isDirectory: meta.isDirectory,
+            head: headBytes,
+          })
+          viewerStore.set({ file, loading: false, error: null, binary: headBytes !== undefined && looksBinary(headBytes) })
+        } catch (error) {
+          viewerStore.set({ loading: false, error: messageOf(error) })
+        }
+      }
+
+      return {
+        openFile,
+        stat: (path) => rpcCall('stat', { path }),
+        readRange: (path, offset, length) => rpcCall('readRange', { path, offset, length }),
+        readHead: (path, maxBytes) => rpcCall('readHead', { path, maxBytes }),
+        list: (path) => rpcCall('list', { path }),
+        openExternal: (path) => rpcCall('openExternal', { path }),
+        dataUrl: async (path, mime) => {
+          const range = await rpcCall<{ data: string; size: number }>('readRange', { path, offset: 0, length: 50 * 1024 * 1024 })
+          return `data:${mime};base64,${range.data}`
+        },
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Error boundary
+    // -----------------------------------------------------------------------
+    interface ErrorBoundaryProps { children?: unknown; onError: (error: Error) => void }
+    interface ErrorBoundaryState { error: Error | null }
+    class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+      constructor(props: ErrorBoundaryProps) {
+        super(props)
+        this.state = { error: null }
+      }
+
+      static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+        return { error }
+      }
+
+      override componentDidCatch(error: Error): void {
+        this.props.onError(error)
+      }
+
+      override render(): React.ReactNode {
+        // The host renders its own error panel via onError; render nothing here.
+        return this.state.error === null ? (this.props.children as React.ReactNode) : null
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Shared UI atoms
+    // -----------------------------------------------------------------------
+    type ToolbarButtonProps = { label: string; title?: string; onClick: () => void; disabled?: boolean; primary?: boolean }
+    function ToolbarButton(props: ToolbarButtonProps): React.ReactNode {
+      return React.createElement(
+        'button',
+        {
+          type: 'button',
+          className: `dsfv-toolbar-btn${props.primary === true ? ' isPrimary' : ''}`,
+          title: props.title ?? props.label,
+          'aria-label': props.label,
+          disabled: props.disabled === true,
+          onClick: props.onClick,
+        },
+        props.label,
+      )
+    }
+
+    function IconButton(props: { glyph: string; label: string; onClick: () => void; disabled?: boolean; title?: string }): React.ReactNode {
+      return React.createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'dsfv-icon-btn',
+          title: props.title ?? props.label,
+          'aria-label': props.label,
+          disabled: props.disabled === true,
+          onClick: props.onClick,
+        },
+        props.glyph,
+      )
+    }
+
+    function ErrorPanel(props: { title: string; reason: string; onRetry: () => void; onOpenExternal: () => void; t: Translate }): React.ReactNode {
+      const { t } = props
+      return React.createElement(
+        'div',
+        { className: 'dsfv-error' },
+        React.createElement('strong', null, props.title),
+        React.createElement('p', null, t('reason'), ' ', props.reason),
+        React.createElement(
+          'div',
+          { className: 'dsfv-error-actions' },
+          React.createElement(ToolbarButton, { label: t('retry'), primary: true, onClick: props.onRetry }),
+          React.createElement(ToolbarButton, { label: t('openExternal'), onClick: props.onOpenExternal }),
+        ),
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // Viewer panel
+    // -----------------------------------------------------------------------
+    function FileViewerPanel(props: { api: FileViewerApi; t: Translate; useSessions?: (selector: (snapshot: SessionListSnapshot) => string | undefined) => string | undefined }): React.ReactNode {
+      const { api, t } = props
+      const state = useViewerState()
+      React.useEffect(() => {
+        const onKeyDown = (event: KeyboardEvent): void => {
+          if (event.key === 'Escape' && state.open) {
+            viewerStore.set({ open: false })
+          }
+        }
+        window.addEventListener('keydown', onKeyDown)
+        return () => window.removeEventListener('keydown', onKeyDown)
+      }, [state.open])
+
+      if (!state.open) return null
+
+      const close = (): void => { viewerStore.set({ open: false }) }
+      const refresh = (): void => {
+        const file = viewerStore.get().file
+        if (file !== null) api.openFile(file.path, viewerStore.get().options)
+      }
+      const copyPath = (): void => {
+        const file = viewerStore.get().file
+        if (file !== null) void navigator.clipboard?.writeText(file.path)
+      }
+      const openExternal = (): void => {
+        const file = viewerStore.get().file
+        if (file !== null) void api.openExternal(file.path).catch(() => undefined)
+      }
+
+      const file = state.file
+      const plan = file !== null ? initialLoadPlan(file.size) : null
+
+      return React.createElement(
+        'div',
+        { className: 'dsfv-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('panelTitle'), onMouseDown: (event: MouseEvent) => { if (event.target === event.currentTarget) close() } },
+        React.createElement(
+          'section',
+          { className: 'dsfv-panel' },
+          React.createElement(
+            'header',
+            { className: 'dsfv-toolbar' },
+            file === null
+              ? React.createElement('div', { className: 'dsfv-toolbar-file' }, React.createElement('strong', null, t('panelTitle')))
+              : React.createElement(
+                  'div',
+                  { className: 'dsfv-toolbar-file' },
+                  React.createElement('strong', { className: 'dsfv-filename', title: file.path }, file.name),
+                  React.createElement('span', { className: 'dsfv-meta' }, file.mime),
+                  React.createElement('span', { className: 'dsfv-meta' }, formatBytes(file.size)),
+                ),
+            React.createElement(
+              'div',
+              { className: 'dsfv-toolbar-actions' },
+              file !== null && React.createElement(ToolbarButton, { label: t('refresh'), onClick: refresh }),
+              file !== null && React.createElement(ToolbarButton, { label: t('openExternal'), onClick: openExternal }),
+              file !== null && React.createElement(ToolbarButton, { label: t('copyPath'), onClick: copyPath }),
+              React.createElement(ToolbarButton, { label: t('close'), primary: true, onClick: close }),
+            ),
+          ),
+          state.loading
+            ? React.createElement('div', { className: 'dsfv-center' }, t('loading'))
+            : state.error !== null && file === null
+              ? React.createElement(ErrorPanel, {
+                  title: t('previewUnavailable'),
+                  reason: state.error,
+                  onRetry: refresh,
+                  onOpenExternal: openExternal,
+                  t,
+                })
+              : state.mode === 'browse'
+                ? React.createElement(DirectoryBrowser, { api, t, useSessions: props.useSessions })
+                : file === null
+                  ? React.createElement(
+                      'div',
+                      { className: 'dsfv-center dsfv-empty' },
+                      React.createElement('p', null, t('noFileOpen')),
+                      React.createElement(ToolbarButton, { label: t('openInBrowse'), primary: true, onClick: () => viewerStore.set({ mode: 'browse' }) }),
+                    )
+                  : React.createElement(React.Fragment, null,
+                      plan !== null && plan.hint !== undefined
+                        ? React.createElement('div', { className: 'dsfv-hint' }, t('largeFileHint', { size: formatBytes(file.size) }))
+                        : null,
+                      React.createElement(
+                        'div',
+                        { className: 'dsfv-body' },
+                        React.createElement(RendererHost, { api, file, t, options: state.options, onStatus: (status: string) => { viewerStore.set({ status }) } }),
+                      ),
+                      React.createElement(
+                        'footer',
+                        { className: 'dsfv-statusbar' },
+                        React.createElement('span', null, t('encoding')),
+                        React.createElement('span', null, formatBytes(file.size)),
+                        React.createElement('span', null, t('modified'), ' ', formatClock(file.mtimeMs)),
+                        state.status !== '' ? React.createElement('span', { className: 'dsfv-status-extra' }, state.status) : null,
+                      ),
+                    ),
+        ),
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // Directory browser — lists through the boundary-checked /fileviewer RPC.
+    // It starts at the current session's workspace root, so every listed
+    // directory (and every opened file) stays inside the allowed roots.
+    // -----------------------------------------------------------------------
+    interface SessionListSnapshot { byId?: Record<string, { cwd?: string } | undefined>; current?: string }
+    function DirectoryBrowser(props: { api: FileViewerApi; t: Translate; useSessions?: (selector: (snapshot: SessionListSnapshot) => string | undefined) => string | undefined }): React.ReactNode {
+      const { api, t } = props
+      const state = useViewerState()
+      const [busy, setBusy] = React.useState(false)
+      const [error, setError] = React.useState<string | null>(null)
+      const workspaceRoot = props.useSessions?.((snapshot) => {
+        const current = snapshot.current !== undefined ? snapshot.byId?.[snapshot.current] : undefined
+        if (current?.cwd !== undefined) return current.cwd
+        return Object.values(snapshot.byId ?? {}).find((session) => session?.cwd !== undefined)?.cwd
+      })
+
+      const openDirectory = (path: string | null): void => {
+        setBusy(true)
+        setError(null)
+        viewerStore.set({ browsePath: path })
+        const target = path ?? workspaceRoot
+        const promise = target === undefined
+          ? Promise.reject(new Error('No workspace is open yet.'))
+          : api.list(target)
+        promise.then((listing) => {
+          const entries = listing.entries
+            .filter((entry) => !entry.name.startsWith('.'))
+            .sort((a, b) => (a.isDirectory === b.isDirectory ? a.name.localeCompare(b.name) : a.isDirectory ? -1 : 1))
+          viewerStore.set({ browseEntries: entries })
+          setBusy(false)
+        }).catch((reason) => {
+          setError(messageOf(reason))
+          viewerStore.set({ browseEntries: null })
+          setBusy(false)
+        })
+      }
+
+      React.useEffect(() => {
+        if (state.mode === 'browse' && state.browseEntries === null && state.browseError === null) {
+          openDirectory(state.browsePath)
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [state.mode, state.browsePath, workspaceRoot])
+
+      const crumbs = (state.browsePath ?? workspaceRoot ?? '').split('/').filter(Boolean)
+      const rootLabel = t('browse')
+
+      return React.createElement(
+        'div',
+        { className: 'dsfv-browser' },
+        React.createElement(
+          'div',
+          { className: 'dsfv-browser-nav' },
+          React.createElement(IconButton, { glyph: '↑', label: t('goUp'), disabled: state.browsePath === null || state.browsePath === '/', onClick: () => { if (state.browsePath !== null) openDirectory(dirname(state.browsePath) || '/') } }),
+          React.createElement('span', { className: 'dsfv-crumb', onClick: () => openDirectory(null) }, rootLabel),
+          crumbs.map((part, index) => {
+            const path = `/${crumbs.slice(0, index + 1).join('/')}`
+            const isLast = index === crumbs.length - 1
+            return React.createElement(
+              'span',
+              { key: path, className: `dsfv-crumb${isLast ? ' isCurrent' : ''}`, onClick: () => { if (!isLast) openDirectory(path) } },
+              React.createElement('span', { className: 'dsfv-crumb-sep' }, '/'),
+              part,
+            )
+          }),
+        ),
+        error !== null
+          ? React.createElement('div', { className: 'dsfv-center' }, error)
+          : busy && state.browseEntries === null
+            ? React.createElement('div', { className: 'dsfv-center' }, t('loading'))
+            : state.browseEntries === null || state.browseEntries.length === 0
+              ? React.createElement('div', { className: 'dsfv-center' }, t('directoryEmpty'))
+              : React.createElement(
+                  'ul',
+                  { className: 'dsfv-filelist' },
+                  state.browseEntries.map((entry) => React.createElement(
+                    'li',
+                    { key: entry.path },
+                    React.createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsfv-file-row',
+                        title: entry.path,
+                        onClick: () => {
+                          if (entry.isDirectory) openDirectory(entry.path)
+                          else api.openFile(entry.path)
+                        },
+                      },
+                      React.createElement('span', { className: 'dsfv-file-icon', 'aria-hidden': true }, entry.isDirectory ? '▸' : '·'),
+                      React.createElement('span', { className: 'dsfv-file-name' }, entry.name),
+                      React.createElement('span', { className: 'dsfv-file-size' }, entry.isDirectory ? '' : formatBytes(entry.size ?? 0)),
+                    ),
+                  )),
+                ),
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // Renderer host: registry resolution + error isolation
+    // -----------------------------------------------------------------------
+    interface RendererHostProps {
+      api: FileViewerApi
+      file: FileInfo
+      t: Translate
+      options: OpenOptions
+      onStatus: (status: string) => void
+    }
+
+    function RendererHost(props: RendererHostProps): React.ReactNode {
+      const { api, file, t, options, onStatus } = props
+      const [retryNonce, setRetryNonce] = React.useState(0)
+      const [renderError, setRenderError] = React.useState<string | null>(null)
+      const rendererId = viewerRegistry.resolve(file, options.renderer)
+
+      const onRendererError = (error: Error): void => { setRenderError(messageOf(error)) }
+
+      if (renderError !== null) {
+        return React.createElement(ErrorPanel, {
+          title: t('previewUnavailable'),
+          reason: renderError,
+          onRetry: () => { setRenderError(null); setRetryNonce((n) => n + 1) },
+          onOpenExternal: () => void api.openExternal(file.path).catch(() => undefined),
+          t,
+        })
+      }
+
+      const common = { api, file, t, options, onStatus }
+      let renderer: React.ReactNode = null
+      switch (rendererId) {
+        case 'image': renderer = React.createElement(ImageRenderer, common); break
+        case 'pdf': renderer = React.createElement(PdfRenderer, common); break
+        case 'csv': renderer = React.createElement(CsvRenderer, common); break
+        case 'code': renderer = React.createElement(CodeRenderer, common); break
+        case 'markdown': renderer = React.createElement(MarkdownRenderer, common); break
+        case 'json': renderer = React.createElement(JsonRenderer, common); break
+        case 'yaml': renderer = React.createElement(YamlRenderer, common); break
+        case 'text': renderer = React.createElement(TextRenderer, common); break
+        default: renderer = React.createElement(FallbackRenderer, common); break
+      }
+      return React.createElement(
+        ErrorBoundary,
+        { onError: onRendererError },
+        React.createElement('div', { key: `${file.path}:${retryNonce}`, className: 'dsfv-renderer' }, renderer),
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // Text renderer (txt/log/out/ini/conf/unknown text)
+    // -----------------------------------------------------------------------
+    interface TextLikeRendererProps {
+      api: FileViewerApi
+      file: FileInfo
+      t: Translate
+      options: OpenOptions
+      onStatus: (status: string) => void
+    }
+    const MAX_KEPT_LINES = 50_000
+
+    function useChunkedText(api: FileViewerApi, file: FileInfo): {
+      lines: string[]
+      loadedBytes: number
+      eof: boolean
+      truncated: boolean
+      loadMore: () => Promise<void>
+      goToEnd: () => Promise<void>
+      error: string | null
+    } {
+      const [lines, setLines] = React.useState<string[]>([])
+      const [loadedBytes, setLoadedBytes] = React.useState(0)
+      const [eof, setEof] = React.useState(false)
+      const [truncated, setTruncated] = React.useState(false)
+      const [error, setError] = React.useState<string | null>(null)
+      const plan = initialLoadPlan(file.size)
+      const decoderRef = React.useRef<TextDecoder | null>(null)
+      const pendingRef = React.useRef('')
+
+      const decodeAppend = (base64: string): string[] => {
+        const bytes = decodeBase64(base64)
+        if (decoderRef.current === null) decoderRef.current = new TextDecoder('utf-8')
+        const text = decoderRef.current.decode(bytes, { stream: true })
+        const combined = pendingRef.current + text
+        const newlineIndex = combined.lastIndexOf('\n')
+        if (newlineIndex === -1) {
+          pendingRef.current = combined
+          return []
+        }
+        const complete = combined.slice(0, newlineIndex)
+        pendingRef.current = combined.slice(newlineIndex + 1)
+        return complete.split('\n')
+      }
+
+      React.useEffect(() => {
+        let active = true
+        decoderRef.current = null
+        pendingRef.current = ''
+        setLines([])
+        setLoadedBytes(0)
+        setEof(false)
+        setTruncated(false)
+        setError(null)
+        const loadInitial = async (): Promise<void> => {
+          try {
+            const range = await api.readRange(file.path, 0, Math.min(plan.initialBytes, file.size))
+            if (!active) return
+            const initial = decodeAppend(range.data)
+            setLines(initial)
+            setLoadedBytes(range.offset + range.data.length / 4 * 3)
+            if (range.eof) {
+              setEof(true)
+              const tail = pendingRef.current
+              if (tail !== '') setLines((prev) => [...prev, tail])
+            }
+          } catch (reason) {
+            if (active) setError(messageOf(reason))
+          }
+        }
+        void loadInitial()
+        return () => { active = false }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [file.path, file.size])
+
+      const loadMore = async (): Promise<void> => {
+        if (eof || truncated) return
+        try {
+          const range = await api.readRange(file.path, loadedBytes, DEFAULT_CHUNK_BYTES)
+          const more = decodeAppend(range.data)
+          setLines((prev) => {
+            const next = [...prev, ...more]
+            if (next.length > MAX_KEPT_LINES) {
+              setTruncated(true)
+              return next.slice(0, MAX_KEPT_LINES)
+            }
+            return next
+          })
+          const bytesInData = range.data.length / 4 * 3
+          setLoadedBytes(range.offset + bytesInData)
+          if (range.eof) {
+            setEof(true)
+            const tail = pendingRef.current
+            if (tail !== '') setLines((prev) => [...prev, tail])
+          }
+        } catch (reason) {
+          setError(messageOf(reason))
+        }
+      }
+
+      const goToEnd = async (): Promise<void> => {
+        try {
+          const tailLength = Math.min(DEFAULT_CHUNK_BYTES, file.size)
+          const range = await api.readRange(file.path, Math.max(0, file.size - tailLength), tailLength)
+          decoderRef.current = null
+          pendingRef.current = ''
+          const bytes = decodeBase64(range.data)
+          const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
+          const all = text.split('\n')
+          setLines(all)
+          setLoadedBytes(file.size)
+          setEof(true)
+          setTruncated(false)
+        } catch (reason) {
+          setError(messageOf(reason))
+        }
+      }
+
+      return { lines, loadedBytes, eof, truncated, loadMore, goToEnd, error }
+    }
+
+    function LineView(props: { lines: string[]; wrap: boolean; fontSize: number; query: string; jumpLine: number }): React.ReactNode {
+      const { lines, wrap, fontSize, query, jumpLine } = props
+      const containerRef = React.useRef<HTMLDivElement | null>(null)
+      const lineRefs = React.useRef<Array<HTMLDivElement | null>>([])
+      const matches = React.useMemo(() => {
+        if (query === '') return new Set<number>()
+        const lower = query.toLowerCase()
+        const set = new Set<number>()
+        lines.forEach((line, index) => { if (line.toLowerCase().includes(lower)) set.add(index) })
+        return set
+      }, [lines, query])
+
+      React.useEffect(() => {
+        if (jumpLine > 0 && lineRefs.current[jumpLine - 1] !== undefined) {
+          lineRefs.current[jumpLine - 1]?.scrollIntoView({ block: 'center' })
+        }
+      }, [jumpLine, lines.length])
+
+      return React.createElement(
+        'div',
+        { ref: containerRef, className: `dsfv-lines${wrap ? ' isWrap' : ''}` },
+        React.createElement(
+          'div',
+          { className: 'dsfv-line-gutter', 'aria-hidden': true },
+          lines.map((_, index) => React.createElement('div', { key: index, className: 'dsfv-gutter-line', style: { fontSize: `${fontSize}px` } }, String(index + 1))),
+        ),
+        React.createElement(
+          'div',
+          { className: 'dsfv-line-body' },
+          lines.map((line, index) => {
+            const isMatch = matches.has(index)
+            return React.createElement(
+              'div',
+              {
+                key: index,
+                ref: ((node: HTMLDivElement | null): void => { lineRefs.current[index] = node }) as React.Ref<HTMLDivElement>,
+                className: `dsfv-line${isMatch ? ' isMatch' : ''}`,
+                style: { fontSize: `${fontSize}px` },
+                'data-line': String(index + 1),
+              },
+              line === '' ? '\u00a0' : line,
+            )
+          }),
+        ),
+      )
+    }
+
+    function TextRenderer(props: TextLikeRendererProps): React.ReactNode {
+      const { api, file, t, onStatus } = props
+      const [wrap, setWrap] = React.useState(false)
+      const [fontSize, setFontSize] = React.useState(13)
+      const [query, setQuery] = React.useState('')
+      const [jumpLine, setJumpLine] = React.useState(0)
+      const { lines, loadedBytes, eof, truncated, loadMore, goToEnd, error } = useChunkedText(api, file)
+      const plan = initialLoadPlan(file.size)
+
+      React.useEffect(() => {
+        onStatus(`${lines.length} lines`)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [lines.length])
+
+      React.useEffect(() => {
+        const line = props.options.line
+        if (typeof line === 'number' && line > 0) setJumpLine(line)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [])
+
+      if (error !== null) return React.createElement('div', { className: 'dsfv-center' }, error)
+
+      const scrollToNextMatch = (direction: 1 | -1): void => {
+        const lower = query.toLowerCase()
+        const indexes: number[] = []
+        lines.forEach((line, index) => { if (line.toLowerCase().includes(lower)) indexes.push(index) })
+        if (indexes.length === 0) return
+        const current = jumpLine - 1
+        const next = direction === 1
+          ? indexes.find((index) => index > current) ?? indexes[0]
+          : [...indexes].reverse().find((index) => index < current) ?? indexes[indexes.length - 1]
+        if (next !== undefined) setJumpLine(next + 1)
+      }
+
+      return React.createElement(
+        'div',
+        { className: 'dsfv-renderer-stack' },
+        React.createElement(
+          'div',
+          { className: 'dsfv-subtoolbar' },
+          React.createElement(ToolbarButton, { label: t('wordWrap'), onClick: () => setWrap((w) => !w), disabled: false }),
+          React.createElement(IconButton, { glyph: 'A-', label: t('fontSize'), title: t('fontSize'), onClick: () => setFontSize((s) => Math.max(10, s - 1)) }),
+          React.createElement(IconButton, { glyph: 'A+', label: t('fontSize'), title: t('fontSize'), onClick: () => setFontSize((s) => Math.min(24, s + 1)) }),
+          React.createElement('input', {
+            className: 'dsfv-search-input',
+            type: 'search',
+            placeholder: t('search'),
+            value: query,
+            onChange: (event: Event) => setQuery((event.target as HTMLInputElement).value),
+          }),
+          React.createElement(IconButton, { glyph: '↑', label: t('search'), title: '', onClick: () => scrollToNextMatch(-1) }),
+          React.createElement(IconButton, { glyph: '↓', label: t('search'), title: '', onClick: () => scrollToNextMatch(1) }),
+          React.createElement('input', {
+            className: 'dsfv-jump-input',
+            type: 'number',
+            min: 1,
+            placeholder: t('jumpToLine'),
+            onChange: (event: Event) => { const value = Number((event.target as HTMLInputElement).value); if (value > 0) setJumpLine(value) },
+          }),
+          !eof && plan.mode !== 'normal'
+            ? React.createElement(ToolbarButton, { label: t('nextChunk'), onClick: () => void loadMore(), disabled: truncated })
+            : null,
+          !eof && plan.mode === 'large'
+            ? React.createElement(ToolbarButton, { label: t('goToEnd'), onClick: () => void goToEnd() })
+            : null,
+        ),
+        plan.mode !== 'normal' && !eof
+          ? React.createElement('div', { className: 'dsfv-hint' }, t('firstChunk'))
+          : null,
+        truncated
+          ? React.createElement('div', { className: 'dsfv-hint' }, t('truncatedNotice', { count: String(MAX_KEPT_LINES) }))
+          : null,
+        React.createElement(
+          'div',
+          { className: 'dsfv-scroll' },
+          React.createElement(LineView, { lines, wrap, fontSize, query, jumpLine }),
+        ),
+        React.createElement('div', { className: 'dsfv-extra-status' }, `${formatBytes(loadedBytes)} / ${formatBytes(file.size)}`),
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // Code renderer (highlight.js, read-only)
+    // -----------------------------------------------------------------------
+    function CodeRenderer(props: TextLikeRendererProps): React.ReactNode {
+      const { api, file, t } = props
+      const [wrap, setWrap] = React.useState(false)
+      const [fontSize, setFontSize] = React.useState(13)
+      const [jumpLine, setJumpLine] = React.useState(0)
+      const { lines, loadedBytes, eof, truncated, loadMore, goToEnd, error } = useChunkedText(api, file)
+      const plan = initialLoadPlan(file.size)
+      const hljsLang = HLJS_LANG_BY_EXT[file.ext] ?? 'plaintext'
+
+      React.useEffect(() => {
+        const line = props.options.line
+        if (typeof line === 'number' && line > 0) setJumpLine(line)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [])
+
+      if (error !== null) return React.createElement('div', { className: 'dsfv-center' }, error)
+
+      const highlight = (line: string): string => {
+        if (line.trim() === '') return line
+        try {
+          const result = hljs.highlight(line, { language: hljsLang, ignoreIllegals: true })
+          return result.value
+        } catch {
+          return line
+        }
+      }
+
+      return React.createElement(
+        'div',
+        { className: 'dsfv-renderer-stack' },
+        React.createElement(
+          'div',
+          { className: 'dsfv-subtoolbar' },
+          React.createElement('span', { className: 'dsfv-lang-badge' }, hljsLang),
+          React.createElement(ToolbarButton, { label: t('wordWrap'), onClick: () => setWrap((w) => !w) }),
+          React.createElement(IconButton, { glyph: 'A-', label: t('fontSize'), title: t('fontSize'), onClick: () => setFontSize((s) => Math.max(10, s - 1)) }),
+          React.createElement(IconButton, { glyph: 'A+', label: t('fontSize'), title: t('fontSize'), onClick: () => setFontSize((s) => Math.min(24, s + 1)) }),
+          React.createElement('input', {
+            className: 'dsfv-jump-input',
+            type: 'number',
+            min: 1,
+            placeholder: t('jumpToLine'),
+            onChange: (event: Event) => { const value = Number((event.target as HTMLInputElement).value); if (value > 0) setJumpLine(value) },
+          }),
+          !eof && plan.mode !== 'normal' ? React.createElement(ToolbarButton, { label: t('nextChunk'), onClick: () => void loadMore(), disabled: truncated }) : null,
+          !eof && plan.mode === 'large' ? React.createElement(ToolbarButton, { label: t('goToEnd'), onClick: () => void goToEnd() }) : null,
+        ),
+        truncated ? React.createElement('div', { className: 'dsfv-hint' }, t('truncatedNotice', { count: String(MAX_KEPT_LINES) })) : null,
+        React.createElement(
+          'div',
+          { className: 'dsfv-scroll' },
+          React.createElement(
+            'div',
+            { className: 'dsfv-code-wrap' },
+            React.createElement(
+              'div',
+              { className: `dsfv-lines dsfv-code${wrap ? ' isWrap' : ''}` },
+              React.createElement(
+                'div',
+                { className: 'dsfv-line-gutter', 'aria-hidden': true },
+                lines.map((_, index) => React.createElement('div', { key: index, className: 'dsfv-gutter-line', style: { fontSize: `${fontSize}px` } }, String(index + 1))),
+              ),
+              React.createElement(
+                'div',
+                { className: 'dsfv-line-body dsfv-code-body' },
+                lines.map((line, index) => React.createElement(
+                  'div',
+                  { key: index, className: `dsfv-line${index + 1 === jumpLine ? ' isJump' : ''}`, style: { fontSize: `${fontSize}px` } },
+                  React.createElement('span', { className: 'dsfv-code-hl', dangerouslySetInnerHTML: { __html: highlight(line) } }),
+                )),
+              ),
+            ),
+          ),
+        ),
+        React.createElement('div', { className: 'dsfv-extra-status' }, `${formatBytes(loadedBytes)} / ${formatBytes(file.size)}`),
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // Image renderer
+    // -----------------------------------------------------------------------
+    function ImageRenderer(props: { api: FileViewerApi; file: FileInfo; t: Translate; onStatus: (status: string) => void }): React.ReactNode {
+      const { api, file, t, onStatus } = props
+      const [src, setSrc] = React.useState<string | null>(null)
+      const [error, setError] = React.useState<string | null>(null)
+      const [scale, setScale] = React.useState<'fit' | number>('fit')
+      const [dims, setDims] = React.useState<{ width: number; height: number } | null>(null)
+      const [pan, setPan] = React.useState<{ x: number; y: number }>({ x: 0, y: 0 })
+      const containerRef = React.useRef<HTMLDivElement | null>(null)
+      const dragRef = React.useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null)
+
+      React.useEffect(() => {
+        let active = true
+        setError(null)
+        setSrc(null)
+        setDims(null)
+        setScale('fit')
+        setPan({ x: 0, y: 0 })
+        if (file.size > 50 * 1024 * 1024) {
+          setError('Image is too large to preview in the browser (over 50 MB).')
+          return
+        }
+        void api.dataUrl(file.path, file.mime).then((url) => {
+          if (active) setSrc(url)
+        }).catch((reason) => { if (active) setError(messageOf(reason)) })
+        return () => { active = false }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [file.path])
+
+      const onImageLoad = (event: Event): void => {
+        const image = event.target as HTMLImageElement
+        setDims({ width: image.naturalWidth, height: image.naturalHeight })
+        onStatus(`Image · ${image.naturalWidth} × ${image.naturalHeight}`)
+      }
+
+      if (error !== null) return React.createElement('div', { className: 'dsfv-center' }, error)
+      if (src === null) return React.createElement('div', { className: 'dsfv-center' }, t('loading'))
+
+      const zoom = (factor: number): void => {
+        setScale((current) => (current === 'fit' ? 1 : current) * factor)
+        setPan({ x: 0, y: 0 })
+      }
+      const reset = (): void => { setScale('fit'); setPan({ x: 0, y: 0 }) }
+
+      return React.createElement(
+        'div',
+        { className: 'dsfv-renderer-stack' },
+        React.createElement(
+          'div',
+          { className: 'dsfv-subtoolbar' },
+          React.createElement(ToolbarButton, { label: t('fit'), onClick: reset }),
+          React.createElement('span', { className: 'dsfv-zoom-label' }, t('percent', { percent: scale === 'fit' ? 'fit' : String(Math.round(scale * 100)) })),
+          React.createElement(IconButton, { glyph: '−', label: t('zoomOut'), title: t('zoomOut'), onClick: () => zoom(0.8) }),
+          React.createElement(IconButton, { glyph: '+', label: t('zoomIn'), title: t('zoomIn'), onClick: () => zoom(1.25) }),
+          React.createElement(ToolbarButton, { label: t('reset'), onClick: reset }),
+          dims !== null ? React.createElement('span', { className: 'dsfv-meta' }, t('imageDimensions', { width: String(dims.width), height: String(dims.height) })) : null,
+        ),
+        React.createElement(
+          'div',
+          {
+            ref: containerRef,
+            className: 'dsfv-image-stage',
+            onMouseDown: (event: MouseEvent) => {
+              dragRef.current = { startX: event.clientX, startY: event.clientY, panX: pan.x, panY: pan.y }
+              const pointerId = (event as unknown as PointerEvent).pointerId
+              if (pointerId !== undefined) (event.currentTarget as HTMLElement).setPointerCapture?.(pointerId)
+            },
+            onMouseMove: (event: MouseEvent) => {
+              if (dragRef.current === null) return
+              setPan({ x: dragRef.current.panX + (event.clientX - dragRef.current.startX), y: dragRef.current.panY + (event.clientY - dragRef.current.startY) })
+            },
+            onMouseUp: () => { dragRef.current = null },
+          },
+          React.createElement('img', {
+            className: 'dsfv-image',
+            src,
+            alt: file.name,
+            draggable: false,
+            style: {
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale === 'fit' ? 1 : scale})`,
+              maxWidth: scale === 'fit' ? '100%' : 'none',
+              maxHeight: scale === 'fit' ? '100%' : 'none',
+              objectFit: scale === 'fit' ? 'contain' : undefined,
+            },
+            onLoad: onImageLoad,
+          }),
+        ),
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // PDF renderer (pdf.js, lazy page rendering)
+    // -----------------------------------------------------------------------
+    interface PdfDocumentLike { numPages: number; getPage(pageNumber: number): Promise<{ getViewport(params: { scale: number }): { width: number; height: number }; render(params: { canvasContext: CanvasRenderingContext2D; viewport: { width: number; height: number } }): { promise: Promise<void>; cancel?(): void } }> }
+    interface PdfRenderTaskLike { promise: Promise<void>; cancel?(): void }
+
+    function PdfRenderer(props: { api: FileViewerApi; file: FileInfo; t: Translate; onStatus: (status: string) => void }): React.ReactNode {
+      const { api, file, t, onStatus } = props
+      const [error, setError] = React.useState<string | null>(null)
+      const [pdf, setPdf] = React.useState<PdfDocumentLike | null>(null)
+      const [pageNumber, setPageNumber] = React.useState(1)
+      const [scaleMode, setScaleMode] = React.useState<'fit-width' | 'fit-page' | number>('fit-width')
+      const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
+      const stageRef = React.useRef<HTMLDivElement | null>(null)
+      const renderTaskRef = React.useRef<PdfRenderTaskLike | null>(null)
+
+      React.useEffect(() => {
+        let active = true
+        setError(null)
+        setPdf(null)
+        setPageNumber(1)
+        const load = async (): Promise<void> => {
+          if (file.size > 100 * 1024 * 1024) {
+            setError('PDF is larger than 100 MB and cannot be previewed in the browser.')
+            return
+          }
+          try {
+            const range = await api.readRange(file.path, 0, file.size)
+            const bytes = decodeBase64(range.data)
+            const task = pdfjs.getDocument({
+              data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+              isEvalSupported: false,
+              useSystemFonts: true,
+            })
+            const doc = await task.promise
+            if (!active) { void doc.destroy().catch(() => undefined); return }
+            setPdf(doc as unknown as PdfDocumentLike)
+            onStatus(`PDF · ${doc.numPages} pages`)
+          } catch (reason) {
+            if (active) setError(messageOf(reason))
+          }
+        }
+        void load()
+        return () => { active = false; renderTaskRef.current?.cancel?.() }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [file.path])
+
+      const renderPage = React.useCallback(async (doc: PdfDocumentLike, pageNum: number): Promise<void> => {
+        const canvas = canvasRef.current
+        const stage = stageRef.current
+        if (canvas === null || stage === null) return
+        try {
+          const page = await doc.getPage(pageNum)
+          const base = page.getViewport({ scale: 1 })
+          let scale: number
+          const stageWidth = stage.clientWidth - 32
+          const stageHeight = stage.clientHeight - 32
+          if (typeof scaleMode === 'number') {
+            scale = scaleMode
+          } else if (scaleMode === 'fit-width') {
+            scale = Math.max(0.05, stageWidth / base.width)
+          } else {
+            scale = Math.max(0.05, Math.min(stageWidth / base.width, stageHeight / base.height))
+          }
+          const viewport = page.getViewport({ scale })
+          const ratio = window.devicePixelRatio || 1
+          canvas.width = Math.floor(viewport.width * ratio)
+          canvas.height = Math.floor(viewport.height * ratio)
+          canvas.style.width = `${Math.floor(viewport.width)}px`
+          canvas.style.height = `${Math.floor(viewport.height)}px`
+          renderTaskRef.current?.cancel?.()
+          const context = canvas.getContext('2d')
+          if (context === null) return
+          context.setTransform(ratio, 0, 0, ratio, 0, 0)
+          const task = page.render({ canvasContext: context, viewport })
+          renderTaskRef.current = task
+          await task.promise
+        } catch {
+          // render aborted or failed — the page stays blank; user can retry by paging
+        }
+      }, [scaleMode])
+
+      React.useEffect(() => {
+        if (pdf === null) return
+        void renderPage(pdf, pageNumber)
+      }, [pdf, pageNumber, renderPage])
+
+      if (error !== null) {
+        return React.createElement('div', { className: 'dsfv-center' }, t('pdfInvalid'), ' ', React.createElement('p', { className: 'dsfv-muted' }, error))
+      }
+      if (pdf === null) return React.createElement('div', { className: 'dsfv-center' }, t('loading'))
+
+      const go = (next: number): void => {
+        const clamped = Math.min(Math.max(1, next), pdf.numPages)
+        setPageNumber(clamped)
+      }
+
+      return React.createElement(
+        'div',
+        { className: 'dsfv-renderer-stack' },
+        React.createElement(
+          'div',
+          { className: 'dsfv-subtoolbar' },
+          React.createElement(IconButton, { glyph: '‹', label: t('prevPage'), title: t('prevPage'), disabled: pageNumber <= 1, onClick: () => go(pageNumber - 1) }),
+          React.createElement('input', {
+            className: 'dsfv-page-input',
+            type: 'number',
+            min: 1,
+            max: pdf.numPages,
+            value: pageNumber,
+            onChange: (event: Event) => { const value = Number((event.target as HTMLInputElement).value); if (value >= 1) go(value) },
+          }),
+          React.createElement('span', { className: 'dsfv-meta' }, `/ ${pdf.numPages}`),
+          React.createElement(IconButton, { glyph: '›', label: t('nextPage'), title: t('nextPage'), disabled: pageNumber >= pdf.numPages, onClick: () => go(pageNumber + 1) }),
+          React.createElement(ToolbarButton, { label: t('fit'), onClick: () => setScaleMode('fit-page') }),
+          React.createElement(ToolbarButton, { label: t('wordWrap') === 'Word wrap' ? 'Fit width' : '适应宽度', onClick: () => setScaleMode('fit-width') }),
+          React.createElement(IconButton, { glyph: '−', label: t('zoomOut'), title: t('zoomOut'), onClick: () => setScaleMode((mode) => (typeof mode === 'number' ? mode * 0.8 : 1) * 0.8) }),
+          React.createElement(IconButton, { glyph: '+', label: t('zoomIn'), title: t('zoomIn'), onClick: () => setScaleMode((mode) => (typeof mode === 'number' ? mode : 1) * 1.25) }),
+        ),
+        React.createElement(
+          'div',
+          { ref: stageRef, className: 'dsfv-pdf-stage' },
+          React.createElement('canvas', { ref: canvasRef, className: 'dsfv-pdf-canvas' }),
+        ),
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // CSV renderer
+    // -----------------------------------------------------------------------
+    interface CsvRowLike { cells: string[] }
+    function CsvRenderer(props: { api: FileViewerApi; file: FileInfo; t: Translate; onStatus: (status: string) => void }): React.ReactNode {
+      const { api, file, t, onStatus } = props
+      const [rows, setRows] = React.useState<string[][]>([])
+      const [delimiter, setDelimiter] = React.useState(',')
+      const [error, setError] = React.useState<string | null>(null)
+      const [colWidths, setColWidths] = React.useState<number[]>([])
+      const [sortCol, setSortCol] = React.useState<number | null>(null)
+      const [sortDir, setSortDir] = React.useState<'asc' | 'desc'>('asc')
+      const [query, setQuery] = React.useState('')
+      const [loadedBytes, setLoadedBytes] = React.useState(0)
+      const [eof, setEof] = React.useState(false)
+      const [loadingMore, setLoadingMore] = React.useState(false)
+      const scrollRef = React.useRef<HTMLDivElement | null>(null)
+      const parserRef = React.useRef<CsvStreamParser | null>(null)
+      const pendingRef = React.useRef('')
+
+      const ROW_HEIGHT = 28
+
+      const rowsRef = React.useRef<string[][]>([])
+      const eofRef = React.useRef(false)
+
+      const appendChunk = React.useCallback((base64: string, size: number, isEof: boolean): void => {
+        const bytes = decodeBase64(base64)
+        const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
+        const combined = pendingRef.current + text
+        pendingRef.current = combined
+        if (parserRef.current === null) {
+          const detected = detectDelimiter(combined)
+          setDelimiter(detected)
+          parserRef.current = new CsvStreamParser(detected)
+        }
+        let next = [...rowsRef.current, ...parserRef.current.push(combined)]
+        pendingRef.current = ''
+        if (isEof) {
+          next = [...next, ...parserRef.current.finish()]
+          eofRef.current = true
+        }
+        if (next.length > CSV_ROW_CAP) {
+          next = next.slice(0, CSV_ROW_CAP)
+          eofRef.current = true
+        }
+        rowsRef.current = next
+        setRows(next)
+        setEof(eofRef.current)
+        setLoadedBytes((prev) => prev + size)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [])
+
+      React.useEffect(() => {
+        let active = true
+        parserRef.current = null
+        pendingRef.current = ''
+        rowsRef.current = []
+        eofRef.current = false
+        setRows([])
+        setError(null)
+        setLoadedBytes(0)
+        setEof(false)
+        setSortCol(null)
+        setQuery('')
+        const load = async (): Promise<void> => {
+          try {
+            const initialBytes = Math.min(file.size, 1024 * 1024)
+            const range = await api.readRange(file.path, 0, initialBytes)
+            if (!active) return
+            appendChunk(range.data, range.offset + range.data.length / 4 * 3, range.eof)
+          } catch (reason) {
+            if (active) setError(messageOf(reason))
+          }
+        }
+        void load()
+        return () => { active = false }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [file.path])
+
+      const loadMore = async (): Promise<void> => {
+        if (eof || loadingMore || rows.length >= CSV_ROW_CAP) return
+        setLoadingMore(true)
+        try {
+          const range = await api.readRange(file.path, loadedBytes, DEFAULT_CHUNK_BYTES)
+          appendChunk(range.data, range.data.length / 4 * 3, range.eof)
+        } catch (reason) {
+          setError(messageOf(reason))
+        } finally {
+          setLoadingMore(false)
+        }
+      }
+
+      React.useEffect(() => {
+        onStatus(rows.length > 0 ? `${rows.length} rows · ${delimiter}` : '')
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [rows.length, delimiter])
+
+      const [scrollTop, setScrollTop] = React.useState(0)
+      const onScroll = (): void => {
+        const el = scrollRef.current
+        if (el !== null) setScrollTop(el.scrollTop)
+      }
+
+      const dataRows = rows.slice(1)
+      const sorted: string[][] = React.useMemo(() => {
+        if (sortCol === null) return dataRows
+        const direction = sortDir === 'asc' ? 1 : -1
+        const rowsCopy = [...dataRows]
+        rowsCopy.sort((a, b) => {
+          const left = a[sortCol] ?? ''
+          const right = b[sortCol] ?? ''
+          const leftNum = Number(left)
+          const rightNum = Number(right)
+          if (left !== '' && right !== '' && Number.isFinite(leftNum) && Number.isFinite(rightNum)) {
+            return (leftNum - rightNum) * direction
+          }
+          return left.localeCompare(right) * direction
+        })
+        return rowsCopy
+      }, [dataRows, sortCol, sortDir])
+
+      const filtered: string[][] = React.useMemo(() => {
+        if (query === '') return sorted
+        const lower = query.toLowerCase()
+        return sorted.filter((row) => row.some((cell) => cell.toLowerCase().includes(lower)))
+      }, [sorted, query])
+
+      if (error !== null) return React.createElement('div', { className: 'dsfv-center' }, error)
+      if (rows.length === 0) return React.createElement('div', { className: 'dsfv-center' }, t('loading'))
+
+      const header = rows[0] as string[]
+      if (colWidths.length !== header.length) {
+        setColWidths(header.map((_, index) => Math.max(120, Math.min(320, (header[index]?.length ?? 8) * 9 + 40))))
+      }
+
+      const visibleStart = Math.floor(scrollTop / ROW_HEIGHT)
+      const visibleCount = Math.ceil((scrollRef.current?.clientHeight ?? 400) / ROW_HEIGHT) + 4
+      const visibleRows = filtered.slice(visibleStart, visibleStart + visibleCount)
+
+      const toggleSort = (column: number): void => {
+        if (sortCol === column) {
+          setSortDir((direction) => (direction === 'asc' ? 'desc' : 'asc'))
+        } else {
+          setSortCol(column)
+          setSortDir('asc')
+        }
+      }
+
+      const startResize = (column: number, event: MouseEvent): void => {
+        event.preventDefault()
+        const startX = event.clientX
+        const startWidth = colWidths[column] ?? 160
+        const onMove = (moveEvent: MouseEvent): void => {
+          const next = Math.max(60, startWidth + (moveEvent.clientX - startX))
+          setColWidths((widths) => widths.map((width, index) => (index === column ? next : width)))
+        }
+        const onUp = (): void => {
+          window.removeEventListener('mousemove', onMove)
+          window.removeEventListener('mouseup', onUp)
+        }
+        window.addEventListener('mousemove', onMove)
+        window.addEventListener('mouseup', onUp)
+      }
+
+      return React.createElement(
+        'div',
+        { className: 'dsfv-renderer-stack' },
+        React.createElement(
+          'div',
+          { className: 'dsfv-subtoolbar' },
+          React.createElement('span', { className: 'dsfv-lang-badge' }, delimiter === '\t' ? 'TSV' : `CSV · "${delimiter}"`),
+          React.createElement('input', {
+            className: 'dsfv-search-input',
+            type: 'search',
+            placeholder: t('search'),
+            value: query,
+            onChange: (event: Event) => { setQuery((event.target as HTMLInputElement).value); setScrollTop(0); if (scrollRef.current !== null) scrollRef.current.scrollTop = 0 },
+          }),
+          React.createElement('span', { className: 'dsfv-meta' }, t('showingRows', { shown: String(filtered.length), size: formatBytes(file.size) })),
+          !eof && rows.length < CSV_ROW_CAP
+            ? React.createElement(ToolbarButton, { label: loadingMore ? t('loadingMore') : t('loadMore'), disabled: loadingMore, onClick: () => void loadMore() })
+            : null,
+        ),
+        React.createElement(
+          'div',
+          { ref: scrollRef, className: 'dsfv-csv-scroll', onScroll },
+          React.createElement(
+            'table',
+            { className: 'dsfv-csv-table' },
+            React.createElement(
+              'thead',
+              null,
+              React.createElement(
+                'tr',
+                null,
+                React.createElement('th', { className: 'dsfv-csv-rownum', style: { width: 48 } }, '#'),
+                header.map((cell, index) => React.createElement(
+                  'th',
+                  {
+                    key: index,
+                    className: 'dsfv-csv-th',
+                    style: { width: colWidths[index] },
+                    onClick: () => toggleSort(index),
+                    title: sortCol === index ? (sortDir === 'asc' ? t('sortAsc') : t('sortDesc')) : cell,
+                  },
+                  React.createElement('span', { className: 'dsfv-csv-th-label' }, cell),
+                  sortCol === index ? React.createElement('span', { className: 'dsfv-csv-sort', 'aria-hidden': true }, sortDir === 'asc' ? ' ▲' : ' ▼') : null,
+                  React.createElement('span', {
+                    className: 'dsfv-csv-resize',
+                    onMouseDown: (event: MouseEvent) => startResize(index, event),
+                  }),
+                )),
+              ),
+            ),
+            React.createElement(
+              'tbody',
+              null,
+              visibleRows.map((row, offset) => {
+                const rowIndex = visibleStart + offset
+                return React.createElement(
+                  'tr',
+                  { key: rowIndex },
+                  React.createElement('td', { className: 'dsfv-csv-rownum', style: { height: ROW_HEIGHT } }, String(rowIndex + 2)),
+                  row.map((cell, cellIndex) => React.createElement('td', {
+                    key: cellIndex,
+                    style: { width: colWidths[cellIndex], height: ROW_HEIGHT },
+                    title: cell,
+                  }, cell)),
+                )
+              }),
+            ),
+          ),
+        ),
+        eof && rows.length >= CSV_ROW_CAP
+          ? React.createElement('div', { className: 'dsfv-hint' }, t('truncatedNotice', { count: String(CSV_ROW_CAP) }))
+          : null,
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // Markdown renderer (sanitized)
+    // -----------------------------------------------------------------------
+    let markdownItInstance: MarkdownIt | null = null
+    function getMarkdownIt(): MarkdownIt {
+      if (markdownItInstance === null) {
+        markdownItInstance = new MarkdownIt({ html: false, linkify: true, breaks: true })
+      }
+      return markdownItInstance
+    }
+
+    function sanitizeHtml(html: string): string {
+      return DOMPurify.sanitize(html, {
+        USE_PROFILES: { html: true },
+        FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'option', 'link', 'meta', 'base'],
+        FORBID_ATTR: ['style', 'onerror', 'onload', 'onclick'],
+        ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+      })
+    }
+
+    function MarkdownRenderer(props: { api: FileViewerApi; file: FileInfo; t: Translate; options: OpenOptions; onStatus: (status: string) => void }): React.ReactNode {
+      const { api, file, t, options } = props
+      const [text, setText] = React.useState<string | null>(null)
+      const [error, setError] = React.useState<string | null>(null)
+      const [mode, setMode] = React.useState<'preview' | 'source'>(options.renderer === 'markdown' ? 'preview' : 'preview')
+      const [renderedHtml, setRenderedHtml] = React.useState<string | null>(null)
+      const previewRef = React.useRef<HTMLDivElement | null>(null)
+
+      React.useEffect(() => {
+        let active = true
+        setError(null)
+        setText(null)
+        setRenderedHtml(null)
+        const load = async (): Promise<void> => {
+          try {
+            const cap = Math.min(file.size, 4 * 1024 * 1024)
+            const range = await api.readRange(file.path, 0, cap)
+            const decoded = new TextDecoder('utf-8', { fatal: false }).decode(decodeBase64(range.data))
+            if (!active) return
+            setText(decoded)
+            const html = sanitizeHtml(getMarkdownIt().render(decoded))
+            setRenderedHtml(html)
+          } catch (reason) {
+            if (active) setError(messageOf(reason))
+          }
+        }
+        void load()
+        return () => { active = false }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [file.path])
+
+      // Resolve relative image paths against the markdown file's directory.
+      React.useEffect(() => {
+        if (previewRef.current === null) return
+        const root = previewRef.current
+        const dir = dirname(file.path)
+        const images = root.querySelectorAll<HTMLImageElement>('img[src]')
+        const jobs: Array<Promise<void>> = []
+        images.forEach((image) => {
+          const src = image.getAttribute('src') ?? ''
+          if (/^(?:https?:|data:|blob:|#)/i.test(src)) return
+          const resolved = dir === '' ? src : `${dir}/${src}`
+          const job = api.readHead(resolved, 5 * 1024 * 1024).then((head) => {
+            if (head.truncated) return
+            const mime = detectMime(resolved, decodeBase64(head.data))
+            if (mime.startsWith('image/')) {
+              image.src = `data:${mime};base64,${head.data}`
+            }
+          }).catch(() => undefined)
+          jobs.push(job)
+        })
+        void Promise.all(jobs)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [renderedHtml])
+
+      if (error !== null) return React.createElement('div', { className: 'dsfv-center' }, error)
+      if (text === null) return React.createElement('div', { className: 'dsfv-center' }, t('loading'))
+
+      return React.createElement(
+        'div',
+        { className: 'dsfv-renderer-stack' },
+        React.createElement(
+          'div',
+          { className: 'dsfv-subtoolbar' },
+          React.createElement(ToolbarButton, { label: t('preview'), onClick: () => setMode('preview') }),
+          React.createElement(ToolbarButton, { label: t('source'), onClick: () => setMode('source') }),
+        ),
+        mode === 'preview'
+          ? React.createElement(
+              'div',
+              { className: 'dsfv-scroll' },
+              renderedHtml === null
+                ? React.createElement('div', { className: 'dsfv-center' }, t('loading'))
+                : React.createElement('div', { ref: previewRef, className: 'dsfv-markdown', dangerouslySetInnerHTML: { __html: renderedHtml } }),
+            )
+          : React.createElement(
+              'div',
+              { className: 'dsfv-scroll' },
+              React.createElement('pre', { className: 'dsfv-markdown-source' }, text),
+            ),
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // JSON / YAML renderers (tree + source)
+    // -----------------------------------------------------------------------
+    interface DataRendererProps {
+      api: FileViewerApi
+      file: FileInfo
+      t: Translate
+      options: OpenOptions
+      onStatus: (status: string) => void
+    }
+    interface TreeLikeProps extends DataRendererProps {
+      parse: (text: string) => { ok: true; value: unknown; nodes: Array<{ path: string; key: string; value: unknown; kind: 'object' | 'array' | 'scalar'; size: number }> } | { ok: false; error: string }
+    }
+
+    function JsonTreeView(props: { value: unknown; t: Translate }): React.ReactNode {
+      const { value, t } = props
+      const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set())
+      const rootRef = React.useRef<HTMLDivElement | null>(null)
+
+      const toggle = (path: string): void => {
+        setCollapsed((previous) => {
+          const next = new Set(previous)
+          if (next.has(path)) next.delete(path)
+          else next.add(path)
+          return next
+        })
+      }
+      const expandAll = (): void => setCollapsed(new Set())
+      const collapseAll = (): void => {
+        const paths = new Set<string>()
+        const walk = (current: unknown, path: string): void => {
+          if (Array.isArray(current) || (typeof current === 'object' && current !== null)) {
+            if (path !== '') paths.add(path)
+            if (Array.isArray(current)) current.forEach((item, index) => walk(item, `${path}[${index}]`))
+            else Object.entries(current as Record<string, unknown>).forEach(([key, child]) => walk(child, path === '' ? key : `${path}.${key}`))
+          }
+        }
+        walk(value, '')
+        setCollapsed(paths)
+      }
+      const copy = (text: string): void => { void navigator.clipboard?.writeText(text) }
+
+      const kindOf = (item: unknown): 'object' | 'array' | 'scalar' => {
+        if (Array.isArray(item)) return 'array'
+        if (typeof item === 'object' && item !== null) return 'object'
+        return 'scalar'
+      }
+      const sizeOf = (item: unknown): number => {
+        if (Array.isArray(item)) return item.length
+        if (typeof item === 'object' && item !== null) return Object.keys(item as Record<string, unknown>).length
+        return 0
+      }
+
+      const renderChildren = (current: unknown, path: string, depth: number): React.ReactNode => {
+        if (Array.isArray(current)) {
+          return React.createElement(React.Fragment, null,
+            current.map((item, index) => renderNode({ path: `${path}[${index}]`, key: String(index), value: item, kind: kindOf(item), size: sizeOf(item) }, depth)))
+        }
+        if (typeof current === 'object' && current !== null) {
+          return React.createElement(React.Fragment, null,
+            Object.entries(current as Record<string, unknown>).map(([key, item]) => renderNode({ path: `${path}.${key}`, key, value: item, kind: kindOf(item), size: sizeOf(item) }, depth)))
+        }
+        return null
+      }
+
+      const renderNode = (node: { path: string; key: string; value: unknown; kind: 'object' | 'array' | 'scalar'; size: number }, depth: number): React.ReactNode => {
+        const isCollapsed = collapsed.has(node.path)
+        const isContainer = node.kind !== 'scalar'
+        const label = node.key === '' ? '$' : node.key
+        return React.createElement(
+          'div',
+          { key: node.path, className: 'dsfv-json-node', style: { paddingLeft: `${depth * 16}px` } },
+          isContainer
+            ? React.createElement(
+                'div',
+                { className: 'dsfv-json-row' },
+                React.createElement(
+                  'button',
+                  { type: 'button', className: 'dsfv-json-toggle', 'aria-expanded': !isCollapsed, onClick: () => toggle(node.path) },
+                  isCollapsed ? '▸' : '▾',
+                ),
+                React.createElement('span', { className: 'dsfv-json-key' }, label),
+                React.createElement('span', { className: 'dsfv-json-preview' }, node.kind === 'array' ? `[${node.size}]` : `{${node.size}}`),
+                React.createElement(
+                  'button',
+                  { type: 'button', className: 'dsfv-json-copy', onClick: () => copy(node.path) },
+                  t('copyJsonPath'),
+                ),
+              )
+            : React.createElement(
+                'div',
+                { className: 'dsfv-json-row' },
+                React.createElement('span', { className: 'dsfv-json-gutter' }, '·'),
+                React.createElement('span', { className: 'dsfv-json-key' }, label),
+                React.createElement('span', { className: `dsfv-json-value is${typeof node.value === 'string' ? 'String' : typeof node.value === 'number' ? 'Number' : typeof node.value === 'boolean' ? 'Boolean' : 'Null'}` }, scalarText(node.value)),
+                React.createElement(
+                  'button',
+                  { type: 'button', className: 'dsfv-json-copy', onClick: () => copy(JSON.stringify(node.value)) },
+                  t('copyValue'),
+                ),
+              ),
+          isContainer && !isCollapsed
+            ? renderChildren(node.value, node.path, depth + 1)
+            : null,
+        )
+      }
+
+      return React.createElement(
+        'div',
+        { className: 'dsfv-json-tree' },
+        React.createElement(
+          'div',
+          { className: 'dsfv-json-actions' },
+          React.createElement(ToolbarButton, { label: t('expandAll'), onClick: expandAll }),
+          React.createElement(ToolbarButton, { label: t('collapseAll'), onClick: collapseAll }),
+        ),
+        React.createElement('div', { ref: rootRef, className: 'dsfv-json-nodes' }, renderNode({ path: '', key: '', value, kind: kindOf(value), size: sizeOf(value) }, 0)),
+      )
+    }
+
+    function JsonYamlRenderer(props: TreeLikeProps): React.ReactNode {
+      const { api, file, t, parse } = props
+      const [mode, setMode] = React.useState<'tree' | 'source'>('tree')
+      const [parsed, setParsed] = React.useState<{ ok: true; value: unknown; nodes: Array<{ path: string; key: string; value: unknown; kind: 'object' | 'array' | 'scalar'; size: number }> } | { ok: false; error: string } | null>(null)
+      const [text, setText] = React.useState<string | null>(null)
+      const [error, setError] = React.useState<string | null>(null)
+
+      React.useEffect(() => {
+        let active = true
+        setError(null)
+        setParsed(null)
+        setText(null)
+        const load = async (): Promise<void> => {
+          try {
+            const cap = Math.min(file.size, 8 * 1024 * 1024)
+            const range = await api.readRange(file.path, 0, cap)
+            const decoded = new TextDecoder('utf-8', { fatal: false }).decode(decodeBase64(range.data))
+            if (!active) return
+            setText(decoded)
+            const result = parse(decoded)
+            if (result.ok) setParsed(result)
+            else setParsed({ ok: false, error: result.error })
+          } catch (reason) {
+            if (active) setError(messageOf(reason))
+          }
+        }
+        void load()
+        return () => { active = false }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [file.path])
+
+      if (error !== null) return React.createElement('div', { className: 'dsfv-center' }, error)
+      if (text === null) return React.createElement('div', { className: 'dsfv-center' }, t('loading'))
+
+      const hljsLang = file.ext === 'yaml' || file.ext === 'yml' ? 'yaml' : 'json'
+      const highlight = (line: string): string => {
+        if (line.trim() === '') return line
+        try {
+          const result = hljs.highlight(line, { language: hljsLang, ignoreIllegals: true })
+          return result.value
+        } catch {
+          return line
+        }
+      }
+      const lines = text.split('\n')
+
+      return React.createElement(
+        'div',
+        { className: 'dsfv-renderer-stack' },
+        React.createElement(
+          'div',
+          { className: 'dsfv-subtoolbar' },
+          React.createElement(ToolbarButton, { label: t('tree'), onClick: () => setMode('tree') }),
+          React.createElement(ToolbarButton, { label: t('source'), onClick: () => setMode('source') }),
+          parsed !== null && !parsed.ok
+            ? React.createElement('span', { className: 'dsfv-meta dsfv-muted' }, t('reason'), ' ', parsed.error)
+            : null,
+        ),
+        mode === 'tree' && parsed !== null && parsed.ok
+          ? React.createElement('div', { className: 'dsfv-scroll' }, React.createElement(JsonTreeView, { value: parsed.value, t }))
+          : React.createElement(
+              'div',
+              { className: 'dsfv-scroll' },
+              React.createElement(
+                'div',
+                { className: 'dsfv-lines dsfv-code' },
+                React.createElement(
+                  'div',
+                  { className: 'dsfv-line-gutter', 'aria-hidden': true },
+                  lines.map((_, index) => React.createElement('div', { key: index, className: 'dsfv-gutter-line' }, String(index + 1))),
+                ),
+                React.createElement(
+                  'div',
+                  { className: 'dsfv-line-body dsfv-code-body' },
+                  lines.map((line, index) => React.createElement(
+                    'div',
+                    { key: index, className: 'dsfv-line' },
+                    React.createElement('span', { className: 'dsfv-code-hl', dangerouslySetInnerHTML: { __html: highlight(line) } }),
+                  )),
+                ),
+              ),
+            ),
+      )
+    }
+
+    function JsonRenderer(props: DataRendererProps): React.ReactNode {
+      return React.createElement(JsonYamlRenderer, { ...props, parse: (text) => {
+        const result = parseJson(text)
+        return result.ok
+          ? { ok: true as const, value: result.value, nodes: result.nodes }
+          : { ok: false as const, error: result.error }
+      } })
+    }
+
+    function YamlRenderer(props: DataRendererProps): React.ReactNode {
+      return React.createElement(JsonYamlRenderer, { ...props, parse: (text) => {
+        try {
+          const value = yamlLoad(text)
+          return { ok: true as const, value, nodes: [] }
+        } catch (error) {
+          return { ok: false as const, error: error instanceof Error ? error.message : String(error) }
+        }
+      } })
+    }
+
+    // -----------------------------------------------------------------------
+    // Fallback renderer
+    // -----------------------------------------------------------------------
+    function FallbackRenderer(props: { api: FileViewerApi; file: FileInfo; t: Translate }): React.ReactNode {
+      const { api, file, t } = props
+      const binary = viewerStore.get().binary
+      const openAsText = !binary && file.size <= 5 * 1024 * 1024
+
+      return React.createElement(
+        'div',
+        { className: 'dsfv-fallback' },
+        React.createElement('strong', null, t('previewUnavailable')),
+        React.createElement(
+          'dl',
+          { className: 'dsfv-fallback-dl' },
+          React.createElement('dt', null, t('filename')),
+          React.createElement('dd', null, file.path),
+          React.createElement('dt', null, t('type')),
+          React.createElement('dd', null, file.mime),
+          React.createElement('dt', null, t('size')),
+          React.createElement('dd', null, formatBytes(file.size)),
+        ),
+        React.createElement(
+          'div',
+          { className: 'dsfv-error-actions' },
+          React.createElement(ToolbarButton, { label: t('openExternal'), primary: true, onClick: () => void api.openExternal(file.path).catch(() => undefined) }),
+          React.createElement(ToolbarButton, { label: t('revealInExplorer'), onClick: () => void api.openExternal(dirname(file.path) || file.path).catch(() => undefined) }),
+          React.createElement(ToolbarButton, { label: t('copyPath'), onClick: () => void navigator.clipboard?.writeText(file.path) }),
+          openAsText
+            ? React.createElement(ToolbarButton, { label: t('openAsText'), onClick: () => viewerStore.set({ options: { ...viewerStore.get().options, renderer: 'text' } }) })
+            : binary
+              ? React.createElement('p', { className: 'dsfv-muted' }, t('openTextHint'))
+              : null,
+        ),
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // Produced-file chips (conversation.chat.turnTail chain entry)
+    // -----------------------------------------------------------------------
+    interface DeliverablesLocation { produced: Array<{ seq: number; path: string }> }
+    function producedForClosing(data: DeliverablesLocation | undefined, seq: number): string[] {
+      if (data === undefined) return []
+      const paths: string[] = []
+      const seen = new Set<string>()
+      for (const produced of data.produced) {
+        if (produced.seq > seq || seen.has(produced.path)) continue
+        seen.add(produced.path)
+        paths.push(produced.path)
+      }
+      return paths
+    }
+
+    function selectProducedFiles(owner: { turn: { data: { get(key: string): unknown } }; seq: number }): string[] | null {
+      const paths = producedForClosing(owner.turn.data.get('deliverables') as DeliverablesLocation | undefined, owner.seq)
+      return paths.length === 0 ? null : paths
+    }
+
+    function ProducedFileChips(props: { matched: string[]; api: FileViewerApi; t: Translate; sessionId?: string; useSessions?: (selector: (snapshot: { byId?: Record<string, { cwd?: string } | undefined> }) => string | undefined) => string | undefined }): React.ReactNode {
+      const { matched: paths, api, t, sessionId, useSessions } = props
+      const cwd = useSessions?.((snapshot) => snapshot.byId?.[sessionId ?? '']?.cwd)
+      return React.createElement(
+        'div',
+        { className: 'dsfv-produced' },
+        React.createElement('span', { className: 'dsfv-produced-label' }, t('produced')),
+        React.createElement(
+          'div',
+          { className: 'dsfv-produced-row' },
+          paths.map((path) => React.createElement(
+            'button',
+            {
+              type: 'button',
+              key: path,
+              className: 'dsfv-produced-chip',
+              title: path,
+              onClick: () => api.openFile(resolveWorkspacePath(cwd, path)),
+            },
+            basename(path),
+          )),
+          React.createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'dsfv-produced-folder',
+              title: t('showInFolder'),
+              onClick: () => {
+                if (paths[0] !== undefined) {
+                  const first = resolveWorkspacePath(cwd, paths[0])
+                  viewerStore.set({ open: true, mode: 'browse', browsePath: dirname(first), browseEntries: null, browseError: null })
+                }
+              },
+            },
+            t('showInFolder'),
+          ),
+        ),
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // Sidebar footer action
+    // -----------------------------------------------------------------------
+    function FileViewerSidebarAction(props: { wide: boolean; api: FileViewerApi; t: Translate }): React.ReactNode {
+      const { wide, api, t } = props
+      return React.createElement(
+        'button',
+        {
+          type: 'button',
+          className: `dsfv-sidebar-action${wide ? ' isWide' : ' isRail'}`,
+          title: t('panelTitle'),
+          'aria-label': t('panelTitle'),
+          onClick: () => viewerStore.set({ open: true, mode: 'browse', browsePath: null, browseEntries: null, browseError: null, file: null, error: null, loading: false }),
+        },
+        React.createElement('svg', { viewBox: '0 0 24 24', className: 'dsfv-sidebar-icon', 'aria-hidden': true },
+          React.createElement('path', { d: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinejoin: 'round' }),
+          React.createElement('path', { d: 'M3 12h18', stroke: 'currentColor', strokeWidth: 1.7 })),
+        wide ? React.createElement('span', { className: 'dsfv-sidebar-label' }, t('panelTitle')) : null,
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // Styles (theme tokens — automatic light/dark)
+    // -----------------------------------------------------------------------
+    function installStyle(): () => void {
+      const css = [
+        '.dsfv-overlay{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.4));pointer-events:auto;font-family:var(--dsw-font-family,inherit)}',
+        '.dsfv-panel{display:flex;flex-direction:column;width:min(1100px,92vw);height:min(720px,86vh);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.3)}',
+        '.dsfv-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;border-bottom:1px solid var(--dsw-alias-border-l1);flex:none}',
+        '.dsfv-toolbar-file{display:flex;align-items:center;gap:10px;min-width:0}',
+        '.dsfv-filename{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px}',
+        '.dsfv-meta{font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}',
+        '.dsfv-muted{color:var(--dsw-alias-label-tertiary)}',
+        '.dsfv-toolbar-actions{display:flex;align-items:center;gap:6px;flex:none}',
+        '.dsfv-toolbar-btn{font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid transparent;border-radius:6px;padding:4px 10px;cursor:pointer;white-space:nowrap}',
+        '.dsfv-toolbar-btn:hover{color:var(--dsw-alias-label-primary)}',
+        '.dsfv-toolbar-btn.isPrimary{background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-inverse)}',
+        '.dsfv-toolbar-btn:disabled{opacity:.5;cursor:default}',
+        '.dsfv-icon-btn{font:inherit;font-size:13px;line-height:1;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid transparent;border-radius:6px;padding:5px 8px;cursor:pointer}',
+        '.dsfv-icon-btn:hover{color:var(--dsw-alias-label-primary)}',
+        '.dsfv-icon-btn:disabled{opacity:.5;cursor:default}',
+        '.dsfv-body{flex:1;min-height:0;display:flex;flex-direction:column}',
+        '.dsfv-renderer{flex:1;min-height:0;display:flex;flex-direction:column}',
+        '.dsfv-renderer-stack{flex:1;min-height:0;display:flex;flex-direction:column}',
+        '.dsfv-subtoolbar{display:flex;align-items:center;gap:6px;padding:6px 12px;border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;flex-wrap:wrap}',
+        '.dsfv-statusbar{display:flex;align-items:center;gap:16px;padding:5px 12px;border-top:1px solid var(--dsw-alias-border-l1);font-size:11px;color:var(--dsw-alias-label-tertiary);flex:none}',
+        '.dsfv-status-extra{margin-left:auto;color:var(--dsw-alias-label-secondary)}',
+        '.dsfv-center{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--dsw-alias-label-secondary);padding:24px;text-align:center}',
+        '.dsfv-empty p{color:var(--dsw-alias-label-tertiary);max-width:420px}',
+        '.dsfv-hint{background:var(--dsw-alias-state-warn-secondary);color:var(--dsw-alias-state-warn-label);font-size:12px;padding:6px 12px;border-bottom:1px solid var(--dsw-alias-border-l1)}',
+        '.dsfv-error{padding:24px;display:flex;flex-direction:column;gap:8px;align-items:flex-start}',
+        '.dsfv-error-actions{display:flex;gap:8px;margin-top:8px}',
+        '.dsfv-scroll{flex:1;min-height:0;overflow:auto;position:relative}',
+        '.dsfv-lines{display:flex;min-width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;line-height:1.55}',
+        '.dsfv-lines.isWrap .dsfv-line-body{white-space:pre-wrap;word-break:break-all}',
+        '.dsfv-line-gutter{flex:none;text-align:right;padding:8px 8px 8px 12px;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-2);user-select:none;border-right:1px solid var(--dsw-alias-border-l1);position:sticky;left:0;z-index:1}',
+        '.dsfv-gutter-line{padding-right:8px;min-width:36px}',
+        '.dsfv-line-body{flex:1;padding:8px 12px;white-space:pre}',
+        '.dsfv-line{min-height:1.55em}',
+        '.dsfv-line.isMatch{background:var(--dsw-alias-state-warn-secondary)}',
+        '.dsfv-line.isJump{background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-inverse)}',
+        '.dsfv-code .dsfv-code-hl{font-family:inherit}',
+        '.dsfv-lang-badge{font-size:11px;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-interactive-bg-hover);border-radius:4px;padding:2px 6px;text-transform:uppercase;letter-spacing:.04em}',
+        '.dsfv-search-input,.dsfv-jump-input,.dsfv-page-input{font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:4px 8px;width:140px}',
+        '.dsfv-jump-input{width:90px}.dsfv-page-input{width:56px}',
+        '.dsfv-extra-status{padding:4px 12px;font-size:11px;color:var(--dsw-alias-label-tertiary);border-top:1px solid var(--dsw-alias-border-l1);flex:none}',
+        '.dsfv-image-stage{flex:1;min-height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;cursor:grab;background:var(--dsw-alias-bg-base)}',
+        '.dsfv-image{user-select:none;transition:transform .08s linear}',
+        '.dsfv-zoom-label{font-size:12px;color:var(--dsw-alias-label-secondary);min-width:44px;text-align:center}',
+        '.dsfv-pdf-stage{flex:1;min-height:0;overflow:auto;display:flex;justify-content:center;background:var(--dsw-alias-bg-base);padding:16px}',
+        '.dsfv-pdf-canvas{box-shadow:0 2px 12px rgba(0,0,0,.25);background:#fff}',
+        '.dsfv-csv-scroll{flex:1;min-height:0;overflow:auto}',
+        '.dsfv-csv-table{border-collapse:separate;border-spacing:0;font-size:12px;min-width:max-content}',
+        '.dsfv-csv-th{position:sticky;top:0;z-index:2;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);border-bottom:1px solid var(--dsw-alias-border-l2);text-align:left;padding:6px 10px;font-weight:600;position:relative;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+        '.dsfv-csv-th-label{display:inline-block;max-width:calc(100% - 6px);overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}',
+        '.dsfv-csv-resize{position:absolute;right:0;top:0;bottom:0;width:5px;cursor:col-resize;z-index:3}',
+        '.dsfv-csv-resize:hover{background:var(--dsw-alias-interactive-bg-hover)}',
+        '.dsfv-csv-sort{color:var(--dsw-alias-state-business-primary)}',
+        '.dsfv-csv-rownum{color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-2);text-align:right;padding:0 8px;font-size:11px;border-bottom:1px solid var(--dsw-alias-border-l1);position:sticky;left:0;z-index:1}',
+        '.dsfv-csv-table td{border-bottom:1px solid var(--dsw-alias-border-l1);padding:0 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:480px;color:var(--dsw-alias-label-primary)}',
+        '.dsfv-csv-table tbody tr:hover{background:var(--dsw-alias-interactive-bg-hover)}',
+        '.dsfv-markdown{max-width:860px;margin:0 auto;padding:24px 32px;font-size:14px;line-height:1.65;color:var(--dsw-alias-label-primary);overflow-wrap:break-word}',
+        '.dsfv-markdown h1,.dsfv-markdown h2,.dsfv-markdown h3{margin:1.2em 0 .5em;line-height:1.3}',
+        '.dsfv-markdown code{background:var(--dsw-alias-markdown-code-block);padding:2px 5px;border-radius:4px;font-size:13px}',
+        '.dsfv-markdown pre{background:var(--dsw-alias-markdown-code-block);padding:12px;border-radius:8px;overflow:auto;border:1px solid var(--dsw-alias-border-l1)}',
+        '.dsfv-markdown pre code{background:none;padding:0}',
+        '.dsfv-markdown table{border-collapse:collapse;margin:1em 0}',
+        '.dsfv-markdown th,.dsfv-markdown td{border:1px solid var(--dsw-alias-border-l2);padding:6px 10px}',
+        '.dsfv-markdown blockquote{border-left:3px solid var(--dsw-alias-border-l3);margin:.6em 0;padding:.2em 1em;color:var(--dsw-alias-label-secondary)}',
+        '.dsfv-markdown a{color:var(--dsw-alias-brand-primary)}',
+        '.dsfv-markdown img{max-width:100%}',
+        '.dsfv-markdown-source{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;padding:16px;white-space:pre-wrap;word-break:break-word}',
+        '.dsfv-json-tree{flex:1;min-height:0;overflow:auto}',
+        '.dsfv-json-actions{display:flex;gap:6px;padding:8px 12px;border-bottom:1px solid var(--dsw-alias-border-l1)}',
+        '.dsfv-json-nodes{padding:8px 0 16px}',
+        '.dsfv-json-row{display:flex;align-items:center;gap:6px;padding:2px 12px;font-size:12.5px}',
+        '.dsfv-json-row:hover{background:var(--dsw-alias-interactive-bg-hover)}',
+        '.dsfv-json-toggle{font-size:10px;width:18px;height:18px;border:none;background:none;color:var(--dsw-alias-label-secondary);cursor:pointer;padding:0}',
+        '.dsfv-json-gutter{width:18px;color:var(--dsw-alias-label-tertiary);text-align:center}',
+        '.dsfv-json-key{color:var(--dsw-alias-state-business-primary);white-space:nowrap}',
+        '.dsfv-json-preview{color:var(--dsw-alias-label-tertiary);font-size:11px}',
+        '.dsfv-json-value{white-space:nowrap}.dsfv-json-value.isString{color:var(--dsw-alias-state-success-primary)}.dsfv-json-value.isNumber{color:var(--dsw-alias-state-business-primary)}.dsfv-json-value.isBoolean{color:var(--dsw-alias-state-warn-primary)}.dsfv-json-value.isNull{color:var(--dsw-alias-label-tertiary)}',
+        '.dsfv-json-copy{font-size:10px;color:var(--dsw-alias-label-tertiary);background:none;border:1px solid transparent;border-radius:4px;padding:1px 5px;cursor:pointer;margin-left:auto}',
+        '.dsfv-json-copy:hover{color:var(--dsw-alias-label-secondary);border-color:var(--dsw-alias-border-l2)}',
+        '.dsfv-browser{flex:1;min-height:0;display:flex;flex-direction:column}',
+        '.dsfv-browser-nav{display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;flex-wrap:wrap}',
+        '.dsfv-crumb{font-size:12px;color:var(--dsw-alias-label-secondary);cursor:pointer;display:flex;align-items:center;gap:2px;padding:2px 4px;border-radius:4px}',
+        '.dsfv-crumb:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}',
+        '.dsfv-crumb.isCurrent{color:var(--dsw-alias-label-primary);font-weight:600}',
+        '.dsfv-crumb-sep{color:var(--dsw-alias-label-tertiary)}',
+        '.dsfv-filelist{list-style:none;margin:0;padding:6px 0;overflow:auto;flex:1}',
+        '.dsfv-file-row{display:flex;align-items:center;gap:10px;width:100%;padding:5px 16px;border:none;background:none;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left}',
+        '.dsfv-file-row:hover{background:var(--dsw-alias-interactive-bg-hover)}',
+        '.dsfv-file-icon{color:var(--dsw-alias-label-tertiary);width:14px;flex:none}',
+        '.dsfv-file-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        '.dsfv-file-size{font-size:11px;color:var(--dsw-alias-label-tertiary);flex:none}',
+        '.dsfv-fallback{padding:32px;display:flex;flex-direction:column;gap:12px;align-items:flex-start;overflow:auto}',
+        '.dsfv-fallback-dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;font-size:13px}',
+        '.dsfv-fallback-dl dt{color:var(--dsw-alias-label-tertiary)}',
+        '.dsfv-fallback-dl dd{margin:0;color:var(--dsw-alias-label-primary);word-break:break-all}',
+        '.dsfv-produced{display:flex;align-items:flex-start;gap:8px;margin-top:14px;font-size:13px}',
+        '.dsfv-produced-label{color:var(--dsw-alias-label-tertiary);flex:none;padding-top:2px}',
+        '.dsfv-produced-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}',
+        '.dsfv-produced-chip{font:inherit;font-size:12.5px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover);border:none;border-radius:6px;padding:2px 8px;cursor:pointer;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        '.dsfv-produced-chip:hover{color:var(--dsw-alias-label-primary);text-decoration:underline}',
+        '.dsfv-produced-folder{font:inherit;font-size:12px;color:var(--dsw-alias-label-tertiary);background:none;border:none;padding:2px 4px;cursor:pointer}',
+        '.dsfv-produced-folder:hover{color:var(--dsw-alias-label-secondary);text-decoration:underline}',
+        '.dsfv-sidebar-action{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;border:none;background:none;color:var(--dsw-alias-label-secondary);cursor:pointer;font:inherit;font-size:13px;text-align:left;border-radius:6px}',
+        '.dsfv-sidebar-action:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}',
+        '.dsfv-sidebar-icon{width:18px;height:18px;flex:none}',
+        '.dsfv-sidebar-label{white-space:nowrap}',
+        '.dsfv-sidebar-action.isRail{justify-content:center;padding:8px}',
+        '.dsfv-line-gutter .dsfv-gutter-line{font-size:inherit}',
+      ].join('')
+      const style = document.createElement('style')
+      style.dataset.plugin = 'dsh-file-viewer'
+      style.dataset.pluginCss = 'dsh-file-viewer/styles'
+      style.textContent = css
+      document.head.append(style)
+      return () => style.remove()
+    }
+
+    // -----------------------------------------------------------------------
+    // Viewer registry instance (extensible by other plugins via ctx.provide)
+    // -----------------------------------------------------------------------
+    const viewerRegistry = new RendererRegistry()
+
+    // -----------------------------------------------------------------------
+    // Plugin body
+    // -----------------------------------------------------------------------
+    function apply(ctx: HostCtxLike): void {
+      const t = ctx.locale.bind(NS)
+      const sessions = ctx.get<SessionsLike>('sessions')
+      const api = createApi(ctx, sessions)
+
+      ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-file-viewer: dictionaries')
+      ctx.effect(installStyle, 'dsh-file-viewer: client styles')
+
+      ctx.provide('fileViewer', {
+        openFile: (path: string, options?: OpenOptions) => api.openFile(path, options),
+        stat: api.stat,
+        readRange: api.readRange,
+        readHead: api.readHead,
+        list: api.list,
+        openExternal: api.openExternal,
+      })
+
+      ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+        name: 'shell.overlay',
+        id: 'dsh-file-viewer',
+        order: 20,
+        locale: NS,
+        inject: () => ({ api }),
+      }, FileViewerPanel))
+
+      ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+        name: 'sidebar.footer.action',
+        id: 'dsh-file-viewer',
+        order: -30,
+        locale: NS,
+        inject: () => ({ api }),
+      }, FileViewerSidebarAction))
+
+      ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+        name: 'conversation.chat.turnTail',
+        select: selectProducedFiles,
+        priority: -1,
+        locale: NS,
+        inject: () => ({ api }),
+      }, ProducedFileChips))
+    }
+
+    module.exports.inject = inject
+    module.exports.apply = apply
+    return module.exports
+  },
+})

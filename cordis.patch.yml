@@ -1,0 +1,7 @@
+# dsh-file-viewer profile patch — applied as a bundle layer so the plugin is
+# inserted into the composed profile tree with its default config.
+- insert:
+    - id: dsh-file-viewer
+      name: dsh-file-viewer
+      config:
+        enabled: true
