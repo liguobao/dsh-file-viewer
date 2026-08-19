@@ -1,0 +1,30 @@
+{
+  "name": "dsh-file-viewer",
+  "version": "0.1.0",
+  "renderers": {
+    "image": { "priority": 100, "formats": ["png", "jpg", "gif", "webp", "svg", "bmp"] },
+    "pdf": { "priority": 100, "engine": "pdf.js", "lazyPages": true },
+    "csv": { "priority": 90, "delimiters": [",", ";", "\\t", "|"], "rowCap": 10000 },
+    "code": { "priority": 80, "languages": 24, "readOnly": true },
+    "markdown": { "priority": 90, "sanitized": true, "modes": ["preview", "source"] },
+    "json": { "priority": 90, "views": ["tree", "source"], "maxBytes": 8388608 },
+    "yaml": { "priority": 90, "views": ["tree", "source"] },
+    "fallback": { "priority": 0 }
+  },
+  "largeFileStrategy": {
+    "normal": { "maxBytes": 5242880, "mode": "whole-file" },
+    "stream": { "maxBytes": 52428800, "mode": "chunked" },
+    "large": { "mode": "head-only" }
+  },
+  "security": {
+    "roots": ["workspaces", "cwd"],
+    "pathValidation": "realpath + contains",
+    "markdownSanitizer": "DOMPurify",
+    "svgLoading": "img tag only"
+  },
+  "integration": {
+    "slots": ["shell.overlay", "sidebar.footer.action", "conversation.chat.turnTail"],
+    "rpcChannel": "/fileviewer",
+    "serviceName": "fileViewer"
+  }
+}
