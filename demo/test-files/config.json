@@ -1,0 +1,16 @@
+{
+  "app": {
+    "name": "dsh-file-viewer",
+    "version": "0.1.0",
+    "enabled": true,
+    "features": ["image", "pdf", "csv", "text", "code", "markdown", "json", "yaml"],
+    "limits": {
+      "wholeFileBytes": 5242880,
+      "chunkBytes": 8388608,
+      "maxRows": 5000
+    },
+    "nested": {
+      "a": { "b": { "c": [1, 2, 3, { "d": "深嵌套" }] } }
+    }
+  }
+}

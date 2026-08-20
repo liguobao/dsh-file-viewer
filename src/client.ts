@@ -5,9 +5,12 @@
  * module-table require (react + the injected @deepseek-ai seeds). The bundle
  * provides:
  *   - the `fileViewer` service (ctx.get('fileViewer')) → openFile(path, opts)
- *   - a `shell.overlay` entry rendering a right-docked viewer column (mirrors
- *     the Harness details panel; opened from produced-file chips or the
- *     workspace "…" menu "浏览文件" entry)
+ *   - a `conversation.view` tab ("文件查看器", sibling of the "对话" and
+ *     "轨迹" tabs) rendering the viewer column inside the conversation area,
+ *     styled like the Harness details panel; opened from produced-file chips
+ *     or the workspace "…" menu "浏览文件" entry
+ *   - `activateFileViewerTab()` — clicks the rendered tab button to switch
+ *     to the viewer tab (tab state is owned by the conversation plugin)
  *   - `window.__dsfvBrowseWorkspace(workspaceIdOrPath)` — the bridge the
  *     patched workspace menu calls (scripts/patch-workspace-menu.mjs)
  *   - a `conversation.chat.turnTail` chain entry (priority -1) rendering
@@ -133,6 +136,8 @@ window.__ModuleLoader__.load({
     const NS = 'fileViewer'
     const zh = {
       panelTitle: '文件查看器',
+      viewFile: '文件查看器',
+      backToBrowser: '返回上一级',
       openFile: '打开 {name}',
       browse: '浏览',
       browseFiles: '浏览文件',
@@ -212,6 +217,8 @@ window.__ModuleLoader__.load({
     } as const
     const en: Record<keyof typeof zh, string> = {
       panelTitle: 'File Viewer',
+      viewFile: 'File Viewer',
+      backToBrowser: 'Back to browser',
       openFile: 'Open {name}',
       browseFiles: 'Browse files',
       browse: 'Browse',
@@ -328,6 +335,8 @@ window.__ModuleLoader__.load({
       browsePath: string | null
       browseEntries: Array<{ name: string; path: string; isDirectory: boolean; size?: number; mtimeMs?: number }> | null
       browseError: string | null
+      /** Whether the "文件查看器" conversation view is the active tab. */
+      active: boolean
     }
 
     const viewerStore = createStore<ViewerState>({
@@ -343,10 +352,45 @@ window.__ModuleLoader__.load({
       browsePath: null,
       browseEntries: null,
       browseError: null,
+      active: false,
     })
 
     function useViewerState(): ViewerState {
       return React.useSyncExternalStore(viewerStore.subscribe, viewerStore.get)
+    }
+
+    // The "文件查看器" tab is registered under conversation.view; switching
+    // tabs is a chatStore action owned by the conversation plugin (not
+    // exposed to third-party slots), so we activate our tab by clicking the
+    // rendered tab button (role="tab", label = viewFile). This runs after
+    // React commits the tab bar; retry briefly in case the header renders
+    // asynchronously.
+    const FILE_VIEWER_TAB_LABELS = ['文件查看器', 'File Viewer']
+    function activateFileViewerTab(): void {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        window.setTimeout(() => {
+          const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+          const label = (tab: HTMLButtonElement): string => (tab.textContent ?? '').trim()
+          const target = tabs.find((tab) => FILE_VIEWER_TAB_LABELS.includes(label(tab)))
+          if (target !== undefined) target.click()
+        }, attempt * 120)
+      }
+    }
+
+    // Leave the viewer tab: click the "对话" tab (the chat view; default
+    // order 0) so the conversation becomes active again, and reset the
+    // viewer to its idle state.
+    const CHAT_TAB_LABELS = ['对话', 'Chat']
+    function leaveFileViewerTab(): void {
+      viewerStore.set({ open: false, mode: 'idle', file: null, error: null, loading: false, status: '', binary: false, browsePath: null, browseEntries: null, browseError: null })
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        window.setTimeout(() => {
+          const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+          const label = (tab: HTMLButtonElement): string => (tab.textContent ?? '').trim()
+          const target = tabs.find((tab) => CHAT_TAB_LABELS.includes(label(tab)))
+          if (target !== undefined) target.click()
+        }, attempt * 120)
+      }
     }
 
     // -----------------------------------------------------------------------
@@ -445,7 +489,10 @@ window.__ModuleLoader__.load({
           viewerStore.set({ open: true, mode: 'file', file: null, options: {}, status: '', error: messageOf(error), loading: false, binary: false, reloadNonce: viewerStore.get().reloadNonce + 1 })
           return
         }
-        viewerStore.set({ open: true, mode: 'file', file: null, options, status: '', error: null, loading: true, binary: false, reloadNonce: viewerStore.get().reloadNonce + 1, browsePath: null, browseEntries: null })
+        // Keep the previous browse context (browsePath/browseEntries) so the
+        // user can step back to the parent directory after previewing a file.
+        viewerStore.set({ open: true, mode: 'file', file: null, options, status: '', error: null, loading: true, binary: false, reloadNonce: viewerStore.get().reloadNonce + 1 })
+        activateFileViewerTab()
         void loadFile(path, options)
       }
 
@@ -564,103 +611,130 @@ window.__ModuleLoader__.load({
     // -----------------------------------------------------------------------
     // Viewer panel
     // -----------------------------------------------------------------------
-    function FileViewerPanel(props: { api: FileViewerApi; t: Translate; useSessions?: (selector: (snapshot: SessionListSnapshot) => string | undefined) => string | undefined }): React.ReactNode {
+    function FileViewerPanel(props: { api: FileViewerApi; t: Translate; sessionId?: string; useSessions?: (selector: (snapshot: SessionListSnapshot) => string | undefined) => string | undefined; onInspectDone?: () => void }): React.ReactNode {
       const { api, t } = props
       const state = useViewerState()
+
       React.useEffect(() => {
         const onKeyDown = (event: KeyboardEvent): void => {
-          if (event.key === 'Escape' && state.open) {
-            viewerStore.set({ open: false })
-          }
+          if (event.key === 'Escape') leaveFileViewerTab()
         }
         window.addEventListener('keydown', onKeyDown)
         return () => window.removeEventListener('keydown', onKeyDown)
-      }, [state.open])
+      }, [])
 
-      if (!state.open) return null
+      // This conversation view renders only while its tab is active, so
+      // mount/unmount is the reliable active signal for the header seat.
+      React.useEffect(() => {
+        viewerStore.set({ active: true })
+        return () => { viewerStore.set({ active: false }) }
+      }, [])
 
-      const close = (): void => { viewerStore.set({ open: false }) }
-      const refresh = (): void => {
-        const file = viewerStore.get().file
-        if (file !== null) api.openFile(file.path, viewerStore.get().options)
-      }
-      const copyPath = (): void => {
-        const file = viewerStore.get().file
-        if (file !== null) void navigator.clipboard?.writeText(file.path)
-      }
-      const openExternal = (): void => {
-        const file = viewerStore.get().file
-        if (file !== null) void api.openExternal(file.path).catch(() => undefined)
-      }
+      // When the tab becomes active with nothing loaded yet, drop straight
+      // into the workspace browser so the current working directory is
+      // listed immediately (no empty-guide detour).
+      React.useEffect(() => {
+        const current = viewerStore.get()
+        if (!current.open && current.mode === 'idle' && current.browseEntries === null) {
+          viewerStore.set({ open: true, mode: 'browse', browsePath: null, browseEntries: null, browseError: null, error: null, loading: false, status: '', binary: false })
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [])
 
       const file = state.file
       const plan = file !== null ? initialLoadPlan(file.size) : null
+      const refresh = (): void => {
+        const current = viewerStore.get().file
+        if (current !== null) api.openFile(current.path, viewerStore.get().options)
+      }
+      const openExternal = (): void => {
+        const current = viewerStore.get().file
+        if (current !== null) void api.openExternal(current.path).catch(() => undefined)
+      }
+      const copyPath = (): void => {
+        const current = viewerStore.get().file
+        if (current !== null) void navigator.clipboard?.writeText(current.path)
+      }
+
+      // Title row inside the view: the path/filename on the left stays
+      // visible the whole time (browse shows the current directory, preview
+      // shows the file), and the file actions sit to its right — nothing
+      // moves into the Harness session header, so no overlap with the tabs.
+      const titleLabel = file !== null
+        ? file.path
+        : state.browsePath ?? t('panelTitle')
 
       return React.createElement(
-        'div',
-        { className: 'dsfv-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('panelTitle') },
+        'section',
+        { className: 'dsfv-panel', 'aria-label': t('panelTitle') },
         React.createElement(
-          'section',
-          { className: 'dsfv-panel' },
+          'div',
+          { className: 'dsfv-titlebar' },
           React.createElement(
-            'header',
-            { className: 'dsfv-toolbar' },
-            file === null
-              ? React.createElement('div', { className: 'dsfv-toolbar-file' }, React.createElement('strong', null, t('panelTitle')))
-              : React.createElement(
-                  'div',
-                  { className: 'dsfv-toolbar-file' },
-                  React.createElement('strong', { className: 'dsfv-filename', title: file.path }, file.name),
-                  React.createElement('span', { className: 'dsfv-meta' }, file.mime),
-                  React.createElement('span', { className: 'dsfv-meta' }, formatBytes(file.size)),
-                ),
+            'div',
+            { className: 'dsfv-titlebar-path' },
+            file !== null
+              ? React.createElement(
+                  'button',
+                  { type: 'button', className: 'dsfv-back-btn', title: t('backToBrowser'), onClick: () => viewerStore.set({ mode: 'browse', file: null, error: null, loading: false }) },
+                  '‹',
+                )
+              : null,
+            React.createElement('strong', { className: 'dsfv-path', title: titleLabel }, titleLabel),
+            file !== null && React.createElement('span', { className: 'dsfv-meta' }, file.mime),
+            file !== null && React.createElement('span', { className: 'dsfv-meta' }, formatBytes(file.size)),
+          ),
+          React.createElement(
+            'div',
+            { className: 'dsfv-titlebar-actions' },
+            file !== null && React.createElement(ToolbarButton, { label: t('refresh'), onClick: refresh }),
+            file !== null && React.createElement(ToolbarButton, { label: t('openExternal'), onClick: openExternal }),
+            file !== null && React.createElement(ToolbarButton, { label: t('copyPath'), onClick: copyPath }),
             React.createElement(
-              'div',
-              { className: 'dsfv-toolbar-actions' },
-              file !== null && React.createElement(ToolbarButton, { label: t('refresh'), onClick: refresh }),
-              file !== null && React.createElement(ToolbarButton, { label: t('openExternal'), onClick: openExternal }),
-              file !== null && React.createElement(ToolbarButton, { label: t('copyPath'), onClick: copyPath }),
-              React.createElement(ToolbarButton, { label: t('close'), primary: true, onClick: close }),
+              'button',
+              { type: 'button', className: 'dsfv-close', 'aria-label': t('close'), title: t('close'), onClick: leaveFileViewerTab },
+              React.createElement('svg', { viewBox: '0 0 16 16', width: '14', height: '14', 'aria-hidden': true },
+                React.createElement('path', { d: 'M4 4l8 8M12 4l-8 8', stroke: 'currentColor', strokeWidth: '1.5', strokeLinecap: 'round' })),
             ),
           ),
-          state.loading
-            ? React.createElement('div', { className: 'dsfv-center' }, t('loading'))
-            : state.error !== null && file === null
-              ? React.createElement(ErrorPanel, {
-                  title: t('previewUnavailable'),
-                  reason: state.error,
-                  onRetry: refresh,
-                  onOpenExternal: openExternal,
-                  t,
-                })
-              : state.mode === 'browse'
-                ? React.createElement(DirectoryBrowser, { api, t, useSessions: props.useSessions })
-                : file === null
-                  ? React.createElement(
-                      'div',
-                      { className: 'dsfv-center dsfv-empty' },
-                      React.createElement('p', null, t('noFileOpen')),
-                      React.createElement(ToolbarButton, { label: t('openInBrowse'), primary: true, onClick: () => viewerStore.set({ mode: 'browse' }) }),
-                    )
-                  : React.createElement(React.Fragment, null,
-                      plan !== null && plan.hint !== undefined
-                        ? React.createElement('div', { className: 'dsfv-hint' }, t('largeFileHint', { size: formatBytes(file.size) }))
-                        : null,
-                      React.createElement(
-                        'div',
-                        { className: 'dsfv-body' },
-                        React.createElement(RendererHost, { api, file, t, options: state.options, onStatus: (status: string) => { viewerStore.set({ status }) } }),
-                      ),
-                      React.createElement(
-                        'footer',
-                        { className: 'dsfv-statusbar' },
-                        React.createElement('span', null, t('encoding')),
-                        React.createElement('span', null, formatBytes(file.size)),
-                        React.createElement('span', null, t('modified'), ' ', formatClock(file.mtimeMs)),
-                        state.status !== '' ? React.createElement('span', { className: 'dsfv-status-extra' }, state.status) : null,
-                      ),
-                    ),
         ),
+        state.loading
+          ? React.createElement('div', { className: 'dsfv-center' }, t('loading'))
+          : state.error !== null && file === null
+            ? React.createElement(ErrorPanel, {
+                title: t('previewUnavailable'),
+                reason: state.error,
+                onRetry: refresh,
+                onOpenExternal: openExternal,
+                t,
+              })
+            : state.mode === 'browse'
+              ? React.createElement(DirectoryBrowser, { api, t, useSessions: props.useSessions })
+              : file === null
+                ? React.createElement(
+                    'div',
+                    { className: 'dsfv-center dsfv-empty' },
+                    React.createElement('p', null, t('noFileOpen')),
+                    React.createElement(ToolbarButton, { label: t('openInBrowse'), primary: true, onClick: () => viewerStore.set({ mode: 'browse' }) }),
+                  )
+                : React.createElement(React.Fragment, null,
+                    plan !== null && plan.hint !== undefined
+                      ? React.createElement('div', { className: 'dsfv-hint' }, t('largeFileHint', { size: formatBytes(file.size) }))
+                      : null,
+                    React.createElement(
+                      'div',
+                      { className: 'dsfv-body' },
+                      React.createElement(RendererHost, { api, file, t, options: state.options, onStatus: (status: string) => { viewerStore.set({ status }) } }),
+                    ),
+                    React.createElement(
+                      'footer',
+                      { className: 'dsfv-statusbar' },
+                      React.createElement('span', null, t('encoding')),
+                      React.createElement('span', null, formatBytes(file.size)),
+                      React.createElement('span', null, t('modified'), ' ', formatClock(file.mtimeMs)),
+                      state.status !== '' ? React.createElement('span', { className: 'dsfv-status-extra' }, state.status) : null,
+                    ),
+                  ),
       )
     }
 
@@ -2017,6 +2091,7 @@ window.__ModuleLoader__.load({
                 if (paths[0] !== undefined) {
                   const first = resolveWorkspacePath(cwd, paths[0])
                   viewerStore.set({ open: true, mode: 'browse', browsePath: dirname(first), browseEntries: null, browseError: null })
+                  activateFileViewerTab()
                 }
               },
             },
@@ -2031,12 +2106,22 @@ window.__ModuleLoader__.load({
     // -----------------------------------------------------------------------
     function installStyle(): () => void {
       const css = [
-        // Right-docked viewer column (mirrors the Harness details panel).
-        '.dsfv-overlay{position:fixed;inset:0;z-index:200;pointer-events:none;display:flex;justify-content:flex-end;font-family:var(--dsw-font-family,inherit)}',
-        '.dsfv-panel{pointer-events:auto;display:flex;flex-direction:column;width:min(720px,72vw);height:100%;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border-left:1px solid var(--dsw-alias-border-l1);overflow:hidden}',
-        '.dsfv-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;border-bottom:1px solid var(--dsw-alias-border-l1);flex:none}',
-        '.dsfv-toolbar-file{display:flex;align-items:baseline;gap:10px;min-width:0}',
-        '.dsfv-filename{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px}',
+        // Conversation view column (sibling of the "轨迹" tab) styled like the
+        // Harness details panel: bg-base surface, header with title + close.
+        // flex:1 fills the conversation viewArea (flex container); min-height:0
+        // lets the inner scroll areas shrink correctly.
+        '.dsfv-panel{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;width:100%;height:100%;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);overflow:hidden}',
+        '.dsfv-toolbar{border-bottom:1px solid var(--dsw-alias-border-l2);justify-content:space-between;align-items:center;gap:8px;padding:14px 12px 12px;display:flex;flex:none}',
+        '.dsfv-toolbar-file{display:flex;align-items:center;gap:10px;min-width:0}',
+        '.dsfv-back-btn{font:inherit;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary);background:transparent;border:none;border-radius:6px;padding:3px 8px;cursor:pointer;white-space:nowrap;flex:none}',
+        '.dsfv-back-btn:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}',
+        '.dsfv-titlebar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;border-bottom:1px solid var(--dsw-alias-border-l2);flex:none;min-width:0}',
+        '.dsfv-titlebar-path{display:flex;align-items:center;gap:8px;min-width:0;flex:1}',
+        '.dsfv-titlebar-actions{display:flex;align-items:center;gap:4px;flex:none}',
+        '.dsfv-path{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:520px}',
+        '.dsfv-title{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:500;line-height:20px;overflow:hidden;max-width:360px}',
+        '.dsfv-close{width:28px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:transparent;border:none;border-radius:999px;flex:none;place-items:center;display:grid}',
+        '.dsfv-close:hover{background:var(--dsw-alias-interactive-bg-hover)}',
         '.dsfv-meta{font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}',
         '.dsfv-muted{color:var(--dsw-alias-label-tertiary)}',
         '.dsfv-toolbar-actions{display:flex;align-items:center;gap:4px;flex:none}',
@@ -2160,7 +2245,11 @@ window.__ModuleLoader__.load({
       // Bridge for the workspace-row "浏览" menu item (patched into
       // dsh-client-ui-workspace by scripts/patch-workspace-menu.mjs): the
       // patched handler passes a workspace id (or, as a fallback, an absolute
-      // path) and we open the docked viewer rooted at that directory.
+      // path) and we open the viewer as a conversation view rooted there.
+      // The "文件查看器" tab is registered under conversation.view; switching
+      // tabs is a chatStore action owned by the conversation plugin, so we
+      // ask the user's active session to activate our tab through the layout
+      // (the tab button itself remains the manual fallback).
       window.__dsfvBrowseWorkspace = (workspaceIdOrPath: string): void => {
         const workspaces = ctx.get<{ list: { getSnapshot(): { items: Array<{ workspaceId: string; path: string }> } } }>('workspaces')
         const items = workspaces?.list.getSnapshot().items ?? []
@@ -2168,6 +2257,7 @@ window.__ModuleLoader__.load({
         const path = match?.path ?? (workspaceIdOrPath.startsWith('/') ? workspaceIdOrPath : undefined)
         if (path === undefined) return
         viewerStore.set({ open: true, mode: 'browse', browsePath: path, browseEntries: null, browseError: null, file: null, error: null, loading: false, status: '', binary: false })
+        activateFileViewerTab()
       }
 
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-file-viewer: dictionaries')
@@ -2182,11 +2272,16 @@ window.__ModuleLoader__.load({
         openExternal: api.openExternal,
       })
 
-      ctx.slots.inject('shell.overlay', () => ctx.slots.register({
-        name: 'shell.overlay',
+      // Register the viewer as a conversation view tab (sibling of the
+      // "对话" and "轨迹" tabs). The conversation plugin renders its
+      // conversation.view children into the center column and lists them as
+      // tabs in the session header when there is more than one.
+      ctx.slots.inject('conversation.view', () => ctx.slots.register({
+        name: 'conversation.view',
         id: 'dsh-file-viewer',
         order: 20,
         locale: NS,
+        label: () => t('viewFile'),
         inject: () => ({ api }),
       }, FileViewerPanel))
 
