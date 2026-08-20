@@ -62,6 +62,13 @@ jobs:
       - name: Build package
         run: NODE_ENV=production pnpm build
 
+      - name: Verify committed bundles are current
+        run: |
+          if [ -n "$(git status --porcelain --untracked-files=all -- dist)" ]; then
+            git status --short --untracked-files=all -- dist
+            exit 1
+          fi
+
       - name: Pack npm package
         run: |
           mkdir -p release-assets

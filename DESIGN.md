@@ -256,7 +256,7 @@ readHead/boundary rejection/missing file).
 
 1. `npm i` (dev: typescript, esbuild, vitest; runtime: pdfjs-dist,
    markdown-it, dompurify, highlight.js — all bundled into `dist/client.js`).
-2. `npm run build` → `dist/index.js` + `dist/client.js`.
+2. `npm run build` → `dist/types` + `dist/index.js` + `dist/client.js`.
 3. `npm run check` (tsc) + `npm test` (vitest).
 4. Install into the web profile: link this repo into
    `~/.dsh/profiles/web/package.json` dependencies, add `dsh-file-viewer` to

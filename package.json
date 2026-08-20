@@ -1,6 +1,6 @@
 {
   "name": "dsh-file-viewer",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "DSH File Viewer — a universal file preview layer for DeepSeek Harness (images, PDF, CSV, text/log, markdown, JSON, YAML, source code).",
   "license": "MIT",
   "repository": {
@@ -55,10 +55,10 @@
     }
   },
   "scripts": {
-    "build": "node scripts/build.mjs",
-    "check": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json --emitDeclarationOnly && node scripts/build.mjs",
+    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
-    "prepare": "node scripts/build.mjs"
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",

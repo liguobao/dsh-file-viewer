@@ -7,8 +7,8 @@
 # built dist to a GitHub Release). This workflow deliberately does NOT run on
 # v* tags so the two never race.
 #
-# `dist/` stays gitignored — it is a build product, produced here and by the
-# `prepare` script on install.
+# `dist/` is committed so GitHub-source installs work when dependency build
+# scripts are disabled. CI rebuilds it and rejects stale committed bundles.
 name: CI
 
 on:
@@ -24,26 +24,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
         with:
-          node-version: 22
-          cache: npm
+          version: 11.21.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Type-check (strict, src + tests)
-        run: npm run check
+        run: pnpm check
 
       - name: Unit tests
-        run: npm test
+        run: pnpm test
 
       - name: Build bundles (dist/index.js + dist/client.js)
-        run: npm run build
+        run: pnpm build
+
+      - name: Verify committed bundles are current
+        run: |
+          if [ -n "$(git status --porcelain --untracked-files=all -- dist)" ]; then
+            git status --short --untracked-files=all -- dist
+            exit 1
+          fi
 
       - name: Package installable tarball
-        run: npm pack --pack-destination dist
+        run: pnpm pack --pack-destination dist
 
       - name: Upload dist artifact
         uses: actions/upload-artifact@v4
@@ -53,4 +65,3 @@ jobs:
             dist/
             *.tgz
           retention-days: 14
-

@@ -143,7 +143,7 @@ ctx.inject(['fileViewer'], runtime => {
 
 ```bash
 npm install            # (use a reachable registry if npmjs TLS is flaky)
-npm run build          # esbuild → dist/index.js + dist/client.js
+npm run build          # declarations + esbuild → dist/types + dist/index.js + dist/client.js
 npm run check          # tsc (strict) over src and tests
 npm test               # vitest: mime, renderer, paths, large-file, csv, json, file-service
 ```
