@@ -1,6 +1,6 @@
 {
   "name": "dsh-file-viewer",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "DSH File Viewer — a universal file preview layer for DeepSeek Harness (images, PDF, CSV, text/log, markdown, JSON, YAML, source code).",
   "license": "MIT",
   "repository": {

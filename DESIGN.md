@@ -140,7 +140,7 @@ dsh-file-viewer/
 ├── vitest.config.ts
 ├── scripts/build.mjs       # esbuild: dist/index.js (node) + dist/client.js (browser)
 ├── src/
-│   ├── index.ts            # node half: apply(); registers /fileviewer RPC channel
+│   ├── index.ts            # node half: apply(); registers /fileviewer + fileViewerHost
 │   ├── public.d.ts         # public API surface
 │   ├── core/               # pure logic — node-safe, unit-tested
 │   │   ├── mime.ts         # MIME detection: extension + magic bytes (never ext-only)
@@ -156,6 +156,10 @@ dsh-file-viewer/
 ```
 
 ### 2.2 Host half — `/fileviewer` RPC (loopback)
+
+The same bounded service is provided to trusted plugins as `fileViewerHost`.
+Transport plugins such as `dsh-remote` may forward a strict endpoint subset;
+provider authorization and root checks stay inside File Viewer.
 
 | Endpoint | Payload | Returns |
 |---|---|---|
@@ -232,6 +236,9 @@ reject otherwise (`bad-request` / `internal` codes, message-carrying).
   friendly panel + Retry / Open externally; the harness UI never crashes).
 - Client RPC retries on the known 405 "route not yet registered" race
   (pattern from dsh-remote).
+- `dsh-remote` registers a high-priority browser content provider only while
+  Remote mode is active. It unregisters after Local fallback, so the same UI
+  resolves local and remote paths without weakening either Host boundary.
 - File-change detection: refresh button; on `stat` mismatch show
   "File changed on disk — Reload" (no forced auto-reload while reading).
 

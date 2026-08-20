@@ -6,7 +6,7 @@
  * `openFile(path, options)`.
  */
 
-import type { Config } from './index.js'
+import type { Config, FileViewerHostService } from './index.js'
 
 export { name, Config } from './index.js'
 export { FileViewerContentRegistry } from './server/content-provider.js'
@@ -26,4 +26,4 @@ export { detectMime, mimeFromExtension, looksBinary } from './core/mime.js'
 export { parseCsv, detectDelimiter, CsvStreamParser } from './core/csv.js'
 export { parseJson, buildJsonTree, scalarText, getByPath } from './core/json.js'
 export { normalizeRequestPath, isPathInside, isInsideAnyRoot, safeJoin, hasTraversal } from './core/paths.js'
-export type { Config }
+export type { Config, FileViewerHostService }

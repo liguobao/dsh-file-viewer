@@ -24,7 +24,8 @@ open and inspect files right inside the web UI — no external application neede
 ## How it works
 
 - **Host half** (`dist/index.js`) registers the `/fileviewer` loopback RPC
-  channel and exposes a `fileViewerContent` provider registry. The viewer does
+  channel and exposes both a `fileViewerContent` provider registry and a
+  `fileViewerHost` bounded service for trusted transport plugins. The viewer does
   not assume content lives in a local folder: other host plugins can register
   readers for locators such as `artifact://run/report.json`, object storage,
   generated output, or remote APIs. A boundary-checked `ctx.fs` provider is
@@ -98,6 +99,12 @@ ctx.inject(['fileViewerContent'], runtime => {
 Providers may additionally implement `list()` for directory-like locators and
 `openExternal()` for source-specific hand-off. `register()` returns an
 unregister function, making provider lifetime follow the supplying plugin.
+
+Trusted transport plugins can inject `fileViewerHost` and forward an explicit
+allowlist of its endpoints. This is how `dsh-remote` previews files on a Remote
+Host: access checks remain owned by the selected File Viewer content provider,
+while the transport applies its own authentication, size limits, and method
+allowlist. `openExternal` is intentionally not part of that remote surface.
 
 Browser-only plugins can register the same reader directly on the client
 service—no host RPC or local path is required:

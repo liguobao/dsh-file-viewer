@@ -52,21 +52,40 @@ export interface HostConnectionLike {
   }
 }
 
+/**
+ * Host-side service exposed to trusted plugins as `fileViewerHost`.
+ *
+ * The service intentionally keeps the same bounded RPC-shaped contract as
+ * the loopback channel. A transport plugin can forward an allowlisted subset
+ * without reaching around File Viewer's provider authorization boundary.
+ */
+export interface FileViewerHostService {
+  handle(endpoint: string, payload: unknown, signal: AbortSignal): Promise<unknown>
+}
+
 export function apply(ctx: HostContextLike, input: Config = {}): void {
   const providers = new FileViewerContentRegistry()
+  const service = new FileViewerService({
+    providers,
+    log: (level, message, fields) => ctx.logger[level](`dsh-file-viewer: ${message}`, fields),
+  })
   ctx.provide('fileViewerContent', providers)
   ctx.inject(['connection'], (runtime) => {
-    void activate(runtime, input, providers)
+    void activate(runtime, input, providers, service)
   })
 }
 
-async function activate(ctx: HostContextLike, input: Config, providers: FileViewerContentRegistry): Promise<void> {
+async function activate(
+  ctx: HostContextLike,
+  input: Config,
+  providers: FileViewerContentRegistry,
+  service: FileViewerService,
+): Promise<void> {
   const config = resolveConfig(input)
   if (!config.enabled) {
     ctx.logger.debug('dsh-file-viewer disabled by config')
     return
   }
-
   const settings = ctx.get<{
     register(
       namespace: string,
@@ -80,6 +99,11 @@ async function activate(ctx: HostContextLike, input: Config, providers: FileView
     validate: (value) => { resolveConfig(value) },
   })
   const merged = resolveConfig(settingsScope?.get() ?? input)
+  if (!merged.enabled) {
+    ctx.logger.debug('dsh-file-viewer disabled by settings')
+    return
+  }
+  ctx.provide('fileViewerHost', service satisfies FileViewerHostService)
 
   const fs = ctx.get<FsLike>('fs')
   const apiProxy = ctx.get<ApiProxyLike>('apiProxy')
@@ -110,11 +134,6 @@ async function activate(ctx: HostContextLike, input: Config, providers: FileView
   } else {
     ctx.logger.info('dsh-file-viewer: ctx.fs is unavailable; waiting for registered content providers')
   }
-
-  const service = new FileViewerService({
-    providers,
-    log: (level, message, fields) => ctx.logger[level](`dsh-file-viewer: ${message}`, fields),
-  })
 
   await ctx.effect(() => {
     const dispose = connection.rpc.handle(
