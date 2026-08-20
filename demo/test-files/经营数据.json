@@ -1,0 +1,20 @@
+{
+  "company": "云果科技",
+  "fiscal": "2026",
+  "quarterly": {
+    "q1": { "revenue": 596.5, "profit": 146.1, "employees": 128 },
+    "q2": { "revenue": 674.8, "profit": 172.4, "employees": 135 },
+    "q3": { "revenue": 765.7, "profit": 201.9, "employees": 142 }
+  },
+  "departments": [
+    { "name": "研发", "headcount": 48, "budget": 860, "projects": ["inventory", "forecast", "pos"] },
+    { "name": "运营", "headcount": 35, "budget": 520, "projects": ["logistics", "quality"] },
+    { "name": "销售", "headcount": 42, "budget": 680, "projects": ["b2b", "retail", "membership"] },
+    { "name": "市场", "headcount": 17, "budget": 310, "projects": ["brand", "campaigns"] }
+  ],
+  "targets": {
+    "annualRevenue": 3000,
+    "annualProfit": 720,
+    "growthRate": 0.18
+  }
+}

@@ -1,0 +1,33 @@
+# 生产环境服务器配置
+server:
+  host: 0.0.0.0
+  port: 8443
+  workers: 4
+  max_requests: 10000
+  keep_alive: 65
+
+database:
+  primary:
+    host: db-primary.internal
+    port: 5432
+    user: app
+    pool: 20
+  replica:
+    - host: db-replica-1.internal
+    - host: db-replica-2.internal
+
+redis:
+  hosts:
+    - 10.0.1.10
+    - 10.0.1.11
+    - 10.0.1.12
+  password_env: REDIS_PASSWORD
+
+logging:
+  level: info
+  format: json
+  outputs:
+    - type: stdout
+    - type: file
+      path: /var/log/app/server.log
+      rotation: 100MB

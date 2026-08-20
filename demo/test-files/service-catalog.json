@@ -1,0 +1,68 @@
+{
+  "project": "fruit-store-platform",
+  "version": "3.2.0",
+  "services": [
+    {
+      "name": "api-gateway",
+      "replicas": 4,
+      "port": 8080,
+      "deps": [
+        "auth",
+        "inventory"
+      ]
+    },
+    {
+      "name": "auth-service",
+      "replicas": 2,
+      "port": 8081,
+      "deps": [
+        "user-db"
+      ]
+    },
+    {
+      "name": "inventory-service",
+      "replicas": 3,
+      "port": 8082,
+      "deps": [
+        "inventory-db",
+        "redis"
+      ]
+    },
+    {
+      "name": "report-service",
+      "replicas": 2,
+      "port": 8083,
+      "deps": [
+        "inventory-db",
+        "warehouse-db"
+      ]
+    },
+    {
+      "name": "notification-service",
+      "replicas": 1,
+      "port": 8084,
+      "deps": [
+        "rabbitmq"
+      ]
+    }
+  ],
+  "databases": {
+    "user-db": {
+      "engine": "postgres",
+      "size": "20GB"
+    },
+    "inventory-db": {
+      "engine": "postgres",
+      "size": "50GB"
+    },
+    "warehouse-db": {
+      "engine": "mysql",
+      "size": "30GB"
+    }
+  },
+  "infra": {
+    "kubernetes": "1.29",
+    "ingress": "nginx",
+    "monitoring": "prometheus + grafana"
+  }
+}

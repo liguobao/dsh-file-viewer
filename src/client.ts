@@ -366,6 +366,10 @@ window.__ModuleLoader__.load({
     // React commits the tab bar; retry briefly in case the header renders
     // asynchronously.
     const FILE_VIEWER_TAB_LABELS = ['文件查看器', 'File Viewer']
+    // Populated from ctx.workspaces at apply time; used to resolve relative
+    // chip paths against every known workspace (the current session cwd may
+    // differ from the workspace that produced the file).
+    const knownWorkspaceRoots: Array<string | undefined> = []
     function activateFileViewerTab(): void {
       for (let attempt = 0; attempt < 5; attempt += 1) {
         window.setTimeout(() => {
@@ -2055,14 +2059,99 @@ window.__ModuleLoader__.load({
       return paths
     }
 
+    // The Harness deliverables registry only records diff/edit tool cards, so
+    // files written by run_code/bash never appear as produced files. As a
+    // fallback, scan the assistant turn text (turn-tail finalized steps) for
+    // file paths and surface them as chips too, so "对话里直接看文件" works
+    // for every write tool.
+    interface AssistantBlock { kind?: string; text?: string }
+    interface TurnTailData {
+      closing?: { blocks?: AssistantBlock[] } | null
+    }
+    function pathsFromAssistantText(data: TurnTailData | undefined): string[] {
+      const blocks = data?.closing?.blocks
+      if (blocks === undefined) return []
+      const paths: string[] = []
+      const seen = new Set<string>()
+      const push = (candidate: string): void => {
+        const trimmed = candidate.trim().replace(/[.,;:!?)\]'"]+$/, '')
+        if (trimmed === '' || !trimmed.includes('/')) return
+        if (/^(https?:|data:|blob:|file:|javascript:)/.test(trimmed)) return
+        if (/[\s\\]/.test(trimmed)) return
+        // Require a file extension or an absolute path, so tool words
+        // (edit, bash, cat ...) and prose fragments never become chips.
+        const hasExt = /\.[a-zA-Z0-9]{1,8}$/.test(trimmed)
+        const isAbs = trimmed.startsWith('/')
+        if (!hasExt && !isAbs) return
+        if (seen.has(trimmed)) return
+        seen.add(trimmed)
+        paths.push(trimmed)
+      }
+      for (const block of blocks) {
+        if (block.kind !== 'text' || block.text === undefined) continue
+        // Markdown inline code / bare paths with at least one slash.
+        const inline = block.text.matchAll(/`([^`]+)`/g)
+        for (const match of inline) push(match[1] ?? '')
+        const bare = block.text.matchAll(/(?:^|[\s(\[,>])([^\s(\[,>]+\/[^\s)\]<]*)/g)
+        for (const match of bare) push(match[1] ?? '')
+      }
+      return paths
+    }
+
     function selectProducedFiles(owner: { turn: { data: { get(key: string): unknown } }; seq: number }): string[] | null {
       const paths = producedForClosing(owner.turn.data.get('deliverables') as DeliverablesLocation | undefined, owner.seq)
+      const tail = owner.turn.data.get('turn-tail') as TurnTailData | undefined
+      for (const candidate of pathsFromAssistantText(tail)) {
+        if (!paths.includes(candidate)) paths.push(candidate)
+      }
       return paths.length === 0 ? null : paths
+    }
+
+    // Only render chips whose files actually exist on disk. The assistant-text
+    // fallback can surface lookalike fragments, so verify each candidate with
+    // a stat RPC before showing it. Paths may be relative to any workspace or
+    // absolute, so try every known root before giving up.
+    function useExistingFiles(paths: string[], api: FileViewerApi, cwd: string | undefined): string[] {
+      const [existing, setExisting] = React.useState<string[]>([])
+      React.useEffect(() => {
+        let active = true
+        const candidates = paths.map((path) => {
+          const absolute = path.startsWith('/') || /^[A-Za-z]:[\/]/.test(path)
+          if (absolute) return [path]
+          const bases = [cwd]
+          for (const root of knownWorkspaceRoots) {
+            if (root !== undefined && root !== '' && !bases.includes(root)) bases.push(root)
+          }
+          return bases
+            .filter((base): base is string => base !== undefined && base !== '')
+            .map((base) => `${base.replace(/[\/]+$/, '')}/${path.replace(/^[\/]+/, '')}`)
+        })
+        void Promise.all(candidates.map(async (pathsForCandidate) => {
+          for (const path of pathsForCandidate) {
+            try {
+              const meta = await api.stat(path)
+              if (meta.exists && !meta.isDirectory) return path
+            } catch {
+              // try the next base
+            }
+          }
+          return null
+        })).then((results) => {
+          if (!active) return
+          const kept = results.filter((path): path is string => path !== null)
+          if (kept.length > 0) setExisting(kept)
+        })
+        return () => { active = false }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [paths.join('|')])
+      return existing
     }
 
     function ProducedFileChips(props: { matched: string[]; api: FileViewerApi; t: Translate; sessionId?: string; useSessions?: (selector: (snapshot: { byId?: Record<string, { cwd?: string } | undefined> }) => string | undefined) => string | undefined }): React.ReactNode {
       const { matched: paths, api, t, sessionId, useSessions } = props
       const cwd = useSessions?.((snapshot) => snapshot.byId?.[sessionId ?? '']?.cwd)
+      const existing = useExistingFiles(paths, api, cwd)
+      if (existing.length === 0) return null
       return React.createElement(
         'div',
         { className: 'dsfv-produced' },
@@ -2070,14 +2159,14 @@ window.__ModuleLoader__.load({
         React.createElement(
           'div',
           { className: 'dsfv-produced-row' },
-          paths.map((path) => React.createElement(
+          existing.map((path) => React.createElement(
             'button',
             {
               type: 'button',
               key: path,
               className: 'dsfv-produced-chip',
               title: path,
-              onClick: () => api.openFile(resolveWorkspacePath(cwd, path)),
+              onClick: () => api.openFile(path),
             },
             basename(path),
           )),
@@ -2088,9 +2177,8 @@ window.__ModuleLoader__.load({
               className: 'dsfv-produced-folder',
               title: t('showInFolder'),
               onClick: () => {
-                if (paths[0] !== undefined) {
-                  const first = resolveWorkspacePath(cwd, paths[0])
-                  viewerStore.set({ open: true, mode: 'browse', browsePath: dirname(first), browseEntries: null, browseError: null })
+                if (existing[0] !== undefined) {
+                  viewerStore.set({ open: true, mode: 'browse', browsePath: dirname(existing[0]), browseEntries: null, browseError: null })
                   activateFileViewerTab()
                 }
               },
@@ -2241,6 +2329,13 @@ window.__ModuleLoader__.load({
       const t = ctx.locale.bind(NS)
       const sessions = ctx.get<SessionsLike>('sessions')
       const api = createApi(ctx, sessions)
+
+      // Remember every known workspace root so relative chip paths can be
+      // resolved even when the current session's cwd differs.
+      const workspacesService = ctx.get<{ list: { getSnapshot(): { items: Array<{ path: string }> } } }>('workspaces')
+      const workspaceItems = workspacesService?.list.getSnapshot().items ?? []
+      knownWorkspaceRoots.length = 0
+      knownWorkspaceRoots.push(...workspaceItems.map((workspace) => workspace.path))
 
       // Bridge for the workspace-row "浏览" menu item (patched into
       // dsh-client-ui-workspace by scripts/patch-workspace-menu.mjs): the

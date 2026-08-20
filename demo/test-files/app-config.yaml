@@ -1,0 +1,36 @@
+# 应用配置 — 用于测试 YAML 渲染器
+service:
+  name: fruit-store
+  version: 2.1.0
+  environment: production
+  port: 8080
+
+database:
+  host: 10.0.0.12
+  port: 5432
+  name: fruit_inventory
+  pool:
+    min: 2
+    max: 16
+    timeout_ms: 5000
+
+features:
+  - name: inventory_tracking
+    enabled: true
+  - name: price_optimization
+    enabled: true
+    params:
+      learning_rate: 0.01
+      epochs: 100
+  - name: seasonal_forecast
+    enabled: false
+
+notifications:
+  email:
+    enabled: true
+    recipients:
+      - ops@fruit-store.example
+      - finance@fruit-store.example
+  webhook:
+    url: https://hooks.example.com/fruit
+    retries: 3

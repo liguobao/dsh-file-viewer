@@ -1,0 +1,111 @@
+{
+  "api": {
+    "name": "fruit-store-api",
+    "version": "v2",
+    "endpoints": [
+      {
+        "method": "GET",
+        "path": "/api/products",
+        "auth": false,
+        "cache": "10s"
+      },
+      {
+        "method": "GET",
+        "path": "/api/products/:id",
+        "auth": false,
+        "cache": "5s"
+      },
+      {
+        "method": "POST",
+        "path": "/api/products",
+        "auth": true,
+        "cache": "none"
+      },
+      {
+        "method": "PUT",
+        "path": "/api/products/:id",
+        "auth": true,
+        "cache": "none"
+      },
+      {
+        "method": "DELETE",
+        "path": "/api/products/:id",
+        "auth": true,
+        "cache": "none"
+      },
+      {
+        "method": "GET",
+        "path": "/api/inventory",
+        "auth": true,
+        "cache": "30s"
+      },
+      {
+        "method": "GET",
+        "path": "/api/reports/sales",
+        "auth": true,
+        "cache": "1h"
+      }
+    ],
+    "rateLimit": {
+      "windowMs": 60000,
+      "max": 120
+    },
+    "retry": {
+      "attempts": 3,
+      "backoff": "exponential",
+      "jitter": 0.1
+    }
+  },
+  "monitoring": {
+    "metrics": [
+      "requests",
+      "latency_p50",
+      "latency_p99",
+      "error_rate",
+      "saturation"
+    ],
+    "alertRules": [
+      {
+        "metric": "error_rate",
+        "threshold": 0.05,
+        "severity": "warning",
+        "cooldown": "5m"
+      },
+      {
+        "metric": "latency_p99",
+        "threshold": 500,
+        "severity": "critical",
+        "cooldown": "2m"
+      },
+      {
+        "metric": "saturation",
+        "threshold": 0.85,
+        "severity": "critical",
+        "cooldown": "1m"
+      }
+    ],
+    "dashboards": [
+      "overview",
+      "inventory",
+      "sales",
+      "errors",
+      "performance"
+    ]
+  },
+  "deployment": {
+    "strategy": "rolling",
+    "replicas": 6,
+    "maxUnavailable": 1,
+    "maxSurge": 2,
+    "healthCheck": {
+      "path": "/healthz",
+      "intervalMs": 10000,
+      "timeoutMs": 3000
+    },
+    "env": [
+      "PRODUCTION",
+      "STAGING",
+      "DEVELOPMENT"
+    ]
+  }
+}
