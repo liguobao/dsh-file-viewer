@@ -61,14 +61,6 @@ fileViewer.openFile('/workspace/src/main.ts', { line: 125 })
 fileViewer.openFile('/workspace/data.bin', { renderer: 'text' }) // force a renderer
 ```
 
-Other plugins can extend the renderer registry:
-
-```ts
-// client side: register a custom renderer rule with priority
-import { RendererRegistry } from 'dsh-file-viewer/core'
-viewerRegistry.register({ id: 'nifti', priority: 500, extensions: ['nii', 'nii.gz'] })
-```
-
 ## Configuration
 
 ```yaml
