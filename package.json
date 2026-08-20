@@ -39,7 +39,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "check": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepare": "node scripts/build.mjs"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
