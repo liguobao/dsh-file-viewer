@@ -24,10 +24,12 @@ open and inspect files right inside the web UI — no external application neede
 ## How it works
 
 - **Host half** (`dist/index.js`) registers the `/fileviewer` loopback RPC
-  channel: `stat`, `readRange`, `readHead`, `list`, `openExternal`, backed by
-  `ctx.fs`. Every path is realpathed and boundary-checked against the allowed
-  roots (workspace directories + host cwd + configured `extraRoots`), so
-  traversal and symlink escapes are rejected.
+  channel and exposes a `fileViewerContent` provider registry. The viewer does
+  not assume content lives in a local folder: other host plugins can register
+  readers for locators such as `artifact://run/report.json`, object storage,
+  generated output, or remote APIs. A boundary-checked `ctx.fs` provider is
+  installed only when that service is available, preserving local-file
+  compatibility without making it a hard dependency.
 - **Client half** (`dist/client.js`) provides the `fileViewer` service
   (`ctx.get('fileViewer')` → `openFile(path, { line, renderer })`) and renders
   a **right-docked viewer column** (styled like the Harness details panel)
@@ -57,8 +59,65 @@ open and inspect files right inside the web UI — no external application neede
 // client side, any web plugin:
 const fileViewer = ctx.get('fileViewer')
 fileViewer.openFile('/workspace/output/report.csv')
+fileViewer.openFile('artifact://run-42/report.csv')
 fileViewer.openFile('/workspace/src/main.ts', { line: 125 })
 fileViewer.openFile('/workspace/data.bin', { renderer: 'text' }) // force a renderer
+```
+
+### Provide content from another host plugin
+
+Register a provider once, then open its locators from any client plugin. The
+provider owns locator matching, authorization, metadata, and range reads; the
+viewer owns preview selection, bounded RPC transfer, and rendering.
+
+```ts
+import type { FileViewerContentRegistry } from 'dsh-file-viewer'
+const report = new TextEncoder().encode('{"status":"ok"}')
+
+ctx.inject(['fileViewerContent'], runtime => {
+  const content = runtime.get<FileViewerContentRegistry>('fileViewerContent')!
+  runtime.effect(() => content.register({
+    id: 'run-artifacts',
+    supports: locator => locator.startsWith('artifact://'),
+    async stat(locator) {
+      if (locator !== 'artifact://run-42/report.json') return undefined
+      return {
+        name: 'report.json',
+        mime: 'application/json',
+        size: report.byteLength,
+      }
+    },
+    async read(locator, { offset, length }) {
+      if (locator !== 'artifact://run-42/report.json') throw new Error('Not found')
+      return report.slice(offset, offset + length)
+    },
+  }), 'register run artifact viewer')
+})
+```
+
+Providers may additionally implement `list()` for directory-like locators and
+`openExternal()` for source-specific hand-off. `register()` returns an
+unregister function, making provider lifetime follow the supplying plugin.
+
+Browser-only plugins can register the same reader directly on the client
+service—no host RPC or local path is required:
+
+```ts
+import type { FileViewerClientService } from 'dsh-file-viewer'
+const markdown = new TextEncoder().encode('# Live preview')
+
+ctx.inject(['fileViewer'], runtime => {
+  const viewer = runtime.get<FileViewerClientService>('fileViewer')!
+  runtime.effect(() => viewer.registerContentProvider({
+    id: 'live-preview',
+    supports: locator => locator === 'memory://preview.md',
+    async stat() { return { name: 'preview.md', size: markdown.byteLength } },
+    async read(_locator, { offset, length }) {
+      return markdown.slice(offset, offset + length)
+    },
+  }), 'register live preview')
+  viewer.openFile('memory://preview.md')
+})
 ```
 
 ## Configuration
@@ -100,7 +159,8 @@ update that reinstalls `@deepseek-ai/dsh-client-ui-workspace`.
 ## Security notes
 
 - Path validation is enforced host-side on realpath'd targets against allowed
-  roots (`fs.contains`); the client pre-check is defense-in-depth only.
+  roots (`fs.contains`) by the optional local-files provider. Custom providers
+  are responsible for authorization within their own locator namespace.
 - Markdown is rendered with `html: false` and sanitized with DOMPurify
   (scripts, iframes, event handlers and `javascript:` URLs removed).
 - SVG is never injected as HTML — it is displayed through `<img>`.

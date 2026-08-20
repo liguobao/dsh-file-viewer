@@ -1,13 +1,15 @@
 /**
  * dsh-file-viewer — node half (host side).
  *
- * Registers the `/fileviewer` loopback RPC channel: stat / readRange /
- * readHead / list / openExternal over `ctx.fs`, boundary-checked against the
- * workspace directories, the host cwd, and any configured extra roots.
+ * Registers the `/fileviewer` loopback RPC channel and a `fileViewerContent`
+ * provider registry. Content can come from any plugin; local workspace files
+ * are only an optional backwards-compatible provider.
  */
 
 import s from '@deepseek-ai/schemastery'
-import { FileViewerService, type FsLike, type ApiProxyLike } from './server/file-service.js'
+import { FileViewerService } from './server/file-service.js'
+import { FileViewerContentRegistry } from './server/content-provider.js'
+import { LocalFileContentProvider, type FsLike, type ApiProxyLike } from './server/local-file-provider.js'
 import { normalizeSeparators } from './core/paths.js'
 
 export const name = 'dsh-file-viewer'
@@ -36,6 +38,7 @@ export interface HostContextLike {
   inject(services: string[], callback: (ctx: HostContextLike) => void | Promise<void>): void
   effect(effect: () => (() => void | Promise<void>) | void, label: string): void
   get<T = unknown>(name: string): T | undefined
+  provide(name: string, value: unknown): void
   logger: { debug(message: string, fields?: unknown): void; info(message: string, fields?: unknown): void; warn(message: string, fields?: unknown): void; error(message: string, fields?: unknown): void }
 }
 
@@ -50,12 +53,14 @@ export interface HostConnectionLike {
 }
 
 export function apply(ctx: HostContextLike, input: Config = {}): void {
-  ctx.inject(['settings', 'fs', 'apiProxy', 'connection'], (runtime) => {
-    void activate(runtime, input)
+  const providers = new FileViewerContentRegistry()
+  ctx.provide('fileViewerContent', providers)
+  ctx.inject(['connection'], (runtime) => {
+    void activate(runtime, input, providers)
   })
 }
 
-async function activate(ctx: HostContextLike, input: Config): Promise<void> {
+async function activate(ctx: HostContextLike, input: Config, providers: FileViewerContentRegistry): Promise<void> {
   const config = resolveConfig(input)
   if (!config.enabled) {
     ctx.logger.debug('dsh-file-viewer disabled by config')
@@ -79,18 +84,14 @@ async function activate(ctx: HostContextLike, input: Config): Promise<void> {
   const fs = ctx.get<FsLike>('fs')
   const apiProxy = ctx.get<ApiProxyLike>('apiProxy')
   const connection = ctx.get<HostConnectionLike>('connection')
-  if (fs === undefined) {
-    ctx.logger.warn('dsh-file-viewer: ctx.fs is unavailable; the viewer is disabled')
-    return
-  }
   if (connection?.rpc === undefined) {
     ctx.logger.warn('dsh-file-viewer: the connection RPC registry is unavailable; the viewer is disabled')
     return
   }
 
-  const cwd = process.cwd()
-  const rootsProvider = async (): Promise<string[]> => {
-    const roots = new Set<string>([cwd, ...merged.extraRoots])
+  let unregisterLocalFiles: (() => void) | undefined
+  if (fs !== undefined) {
+    const roots = new Set<string>([process.cwd(), ...merged.extraRoots])
     if (apiProxy !== undefined) {
       try {
         const response = await apiProxy.workspace.list({ rpcId: 'file-viewer-roots', payload: {} })
@@ -101,14 +102,17 @@ async function activate(ctx: HostContextLike, input: Config): Promise<void> {
         ctx.logger.warn('dsh-file-viewer: workspace list unavailable', error)
       }
     }
-    return [...roots].filter(Boolean)
+    unregisterLocalFiles = providers.register(new LocalFileContentProvider({
+      fs,
+      apiProxy,
+      roots: [...roots].filter(Boolean),
+    }))
+  } else {
+    ctx.logger.info('dsh-file-viewer: ctx.fs is unavailable; waiting for registered content providers')
   }
 
   const service = new FileViewerService({
-    fs,
-    apiProxy,
-    roots: await rootsProvider(),
-    cwd,
+    providers,
     log: (level, message, fields) => ctx.logger[level](`dsh-file-viewer: ${message}`, fields),
   })
 
@@ -119,6 +123,20 @@ async function activate(ctx: HostContextLike, input: Config): Promise<void> {
       { authority: 'loopback' },
     )
     ctx.logger.debug('dsh-file-viewer: /fileviewer channel registered')
-    return dispose
+    return async () => {
+      unregisterLocalFiles?.()
+      await dispose()
+    }
   }, 'dsh-file-viewer: rpc channel')
 }
+
+export { FileViewerContentRegistry } from './server/content-provider.js'
+export type {
+  FileViewerContentEntry,
+  FileViewerContentMeta,
+  FileViewerContentProvider,
+  FileViewerReadRequest,
+} from './server/content-provider.js'
+export { FileViewerService } from './server/file-service.js'
+export type { DirEntryWire, FileMetaWire } from './server/file-service.js'
+export type { FileViewerClientService, FileViewerHeadWire, FileViewerRangeWire } from './client-api.js'

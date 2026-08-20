@@ -9,7 +9,16 @@
 import type { Config } from './index.js'
 
 export { name, Config } from './index.js'
-export type { FileMetaWire, DirEntryWire, FileViewerService } from './server/file-service.js'
+export { FileViewerContentRegistry } from './server/content-provider.js'
+export type {
+  FileViewerContentEntry,
+  FileViewerContentMeta,
+  FileViewerContentProvider,
+  FileViewerReadRequest,
+} from './server/content-provider.js'
+export { FileViewerService } from './server/file-service.js'
+export type { FileMetaWire, DirEntryWire } from './server/file-service.js'
+export type { FileViewerClientService, FileViewerHeadWire, FileViewerRangeWire } from './client-api.js'
 export type { RendererId, FileInfo, OpenOptions, RendererRegistration, RendererRegistry } from './core/renderer.js'
 export type { LargeFileMode, LoadPlan } from './core/large-file.js'
 export { classifySize, initialLoadPlan, allowWholeRead } from './core/large-file.js'

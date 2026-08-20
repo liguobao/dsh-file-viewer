@@ -20,13 +20,14 @@
  * React components over it.
  */
 
-import { detectMime, looksBinary } from './core/mime.js'
+import { detectMime, looksBinary, mimeFromExtension } from './core/mime.js'
 import { RendererRegistry, buildFileInfo, type FileInfo, type OpenOptions } from './core/renderer.js'
 import { initialLoadPlan, DEFAULT_CHUNK_BYTES, CSV_ROW_CAP } from './core/large-file.js'
 import { CsvStreamParser, detectDelimiter } from './core/csv.js'
 import { parseJson, scalarText } from './core/json.js'
 import { normalizeRequestPath } from './core/paths.js'
-import { basename, dirname, formatBytes, formatClock } from './core/format.js'
+import { basename, dirname, extname, formatBytes, formatClock } from './core/format.js'
+import { FileViewerContentRegistry, type FileViewerContentProvider } from './server/content-provider.js'
 import * as pdfjs from 'pdfjs-dist'
 // The PDF.js worker source is injected at build time (scripts/build.mjs) and
 // served from a Blob URL so the single client bundle needs no second file.
@@ -421,6 +422,9 @@ window.__ModuleLoader__.load({
     }
 
     function resolveWorkspacePath(cwd: string | undefined, path: string): string {
+      // Provider locators (for example artifact://run/report.json) are opaque
+      // and must never be rewritten relative to the current workspace.
+      if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(path)) return path
       if (path.startsWith('/') || /^[A-Za-z]:[/\\]/.test(path) || path.startsWith('\\\\')) return path
       if (cwd === undefined || cwd === '') return path
       return `${cwd.replace(/[/\\]+$/, '')}/${path.replace(/^[/\\]+/, '')}`
@@ -456,6 +460,7 @@ window.__ModuleLoader__.load({
 
     interface FileViewerApi {
       openFile(path: string, options?: OpenOptions): void
+      registerContentProvider(provider: FileViewerContentProvider): () => void
       stat(path: string): Promise<{ path: string; name: string; ext: string; mime: string; size: number; mtimeMs?: number; isDirectory: boolean; exists: boolean }>
       readRange(path: string, offset: number, length: number): Promise<{ data: string; offset: number; size: number; eof: boolean }>
       readHead(path: string, maxBytes: number): Promise<{ data: string; size: number; truncated: boolean }>
@@ -464,7 +469,7 @@ window.__ModuleLoader__.load({
       dataUrl(path: string, mime: string): Promise<string>
     }
 
-    function createApi(ctx: HostCtxLike, sessions: SessionsLike | undefined): FileViewerApi {
+    function createApi(ctx: HostCtxLike, sessions: SessionsLike | undefined, contentProviders: FileViewerContentRegistry): FileViewerApi {
       const rpcCall = async <T,>(endpoint: string, payload: Record<string, unknown>): Promise<T> => {
         let result: RpcResultLike
         for (let attempt = 0; ; attempt += 1) {
@@ -478,6 +483,71 @@ window.__ModuleLoader__.load({
         }
         if (!result.ok) throw new Error(result.error?.message ?? 'File Viewer request failed.')
         return result.value as T
+      }
+
+      const stat = async (path: string): Promise<{ path: string; name: string; ext: string; mime: string; size: number; mtimeMs?: number; isDirectory: boolean; exists: boolean }> => {
+        const provider = contentProviders.resolve(path)
+        if (provider === undefined) return rpcCall('stat', { path })
+        const info = await provider.stat(path, new AbortController().signal)
+        if (info === undefined) {
+          return { path, name: basename(path), ext: extname(path), mime: mimeFromExtension(path), size: 0, isDirectory: false, exists: false }
+        }
+        return {
+          path,
+          name: info.name,
+          ext: extname(info.name),
+          mime: info.mime ?? mimeFromExtension(info.name),
+          size: info.isDirectory === true ? 0 : info.size,
+          mtimeMs: info.mtimeMs,
+          isDirectory: info.isDirectory === true,
+          exists: true,
+        }
+      }
+
+      const readRange = async (path: string, offset: number, length: number): Promise<{ data: string; offset: number; size: number; eof: boolean }> => {
+        const provider = contentProviders.resolve(path)
+        if (provider === undefined) return rpcCall('readRange', { path, offset, length })
+        if (!Number.isInteger(offset) || offset < 0) throw new Error('A non-negative integer offset is required.')
+        if (!Number.isInteger(length) || length <= 0) throw new Error('A positive integer length is required.')
+        const signal = new AbortController().signal
+        const info = await provider.stat(path, signal)
+        if (info === undefined) throw new Error('The content does not exist.')
+        const capped = Math.min(length, 8 * 1024 * 1024)
+        const data = await provider.read(path, { offset, length: capped, signal })
+        if (data.byteLength > capped) throw new Error(`Content provider "${provider.id}" returned more bytes than requested.`)
+        return { data: bytesToBase64(data), offset, size: info.size, eof: offset + data.byteLength >= info.size }
+      }
+
+      const readHead = async (path: string, requestedBytes: number): Promise<{ data: string; size: number; truncated: boolean }> => {
+        const provider = contentProviders.resolve(path)
+        if (provider === undefined) return rpcCall('readHead', { path, maxBytes: requestedBytes })
+        const signal = new AbortController().signal
+        const info = await provider.stat(path, signal)
+        if (info === undefined) throw new Error('The content does not exist.')
+        if (info.isDirectory === true) return { data: '', size: 0, truncated: false }
+        const maxBytes = Math.min(Math.max(1, Math.floor(requestedBytes)), 1024 * 1024)
+        const data = await provider.read(path, { offset: 0, length: maxBytes, signal })
+        if (data.byteLength > maxBytes) throw new Error(`Content provider "${provider.id}" returned more bytes than requested.`)
+        return { data: bytesToBase64(data), size: info.size, truncated: data.byteLength < info.size }
+      }
+
+      const list = async (path: string): Promise<{ path: string; entries: Array<{ name: string; path: string; isDirectory: boolean; size?: number; mtimeMs?: number }> }> => {
+        const provider = contentProviders.resolve(path)
+        if (provider === undefined) return rpcCall('list', { path })
+        if (provider.list === undefined) throw new Error(`Content provider "${provider.id}" does not support directory listing.`)
+        const entries = await provider.list(path, new AbortController().signal)
+        return {
+          path,
+          entries: entries.map((entry) => ({ name: entry.name, path: entry.locator, isDirectory: entry.isDirectory === true, size: entry.size, mtimeMs: entry.mtimeMs })),
+        }
+      }
+
+      const openExternal = async (path: string): Promise<{ opened: true }> => {
+        const provider = contentProviders.resolve(path)
+        if (provider === undefined) return rpcCall('openExternal', { path })
+        if (provider.openExternal === undefined) throw new Error(`Content provider "${provider.id}" does not support external open.`)
+        await provider.openExternal(path, new AbortController().signal)
+        return { opened: true }
       }
 
       const currentCwd = (): string | undefined => {
@@ -503,8 +573,8 @@ window.__ModuleLoader__.load({
       const loadFile = async (path: string, options: OpenOptions): Promise<void> => {
         try {
           const [meta, head] = await Promise.all([
-            rpcCall<{ path: string; name: string; ext: string; mime: string; size: number; mtimeMs?: number; isDirectory: boolean; exists: boolean }>('stat', { path }),
-            rpcCall<{ data: string; size: number; truncated: boolean }>('readHead', { path, maxBytes: 4096 }).catch(() => ({ data: '', size: 0, truncated: false })),
+            stat(path),
+            readHead(path, 4096).catch(() => ({ data: '', size: 0, truncated: false })),
           ])
           if (!meta.exists) throw new Error('The file does not exist.')
           const headBytes = head.data !== '' ? decodeBase64(head.data) : undefined
@@ -525,13 +595,14 @@ window.__ModuleLoader__.load({
 
       return {
         openFile,
-        stat: (path) => rpcCall('stat', { path }),
-        readRange: (path, offset, length) => rpcCall('readRange', { path, offset, length }),
-        readHead: (path, maxBytes) => rpcCall('readHead', { path, maxBytes }),
-        list: (path) => rpcCall('list', { path }),
-        openExternal: (path) => rpcCall('openExternal', { path }),
+        registerContentProvider: (provider) => contentProviders.register(provider),
+        stat,
+        readRange,
+        readHead,
+        list,
+        openExternal,
         dataUrl: async (path, mime) => {
-          const range = await rpcCall<{ data: string; size: number }>('readRange', { path, offset: 0, length: 50 * 1024 * 1024 })
+          const range = await readRange(path, 0, 50 * 1024 * 1024)
           return `data:${mime};base64,${range.data}`
         },
       }
@@ -2318,9 +2389,10 @@ window.__ModuleLoader__.load({
     }
 
     // -----------------------------------------------------------------------
-    // Viewer registry instance (extensible by other plugins via ctx.provide)
+    // Viewer and browser-side content registries exposed through ctx.provide.
     // -----------------------------------------------------------------------
     const viewerRegistry = new RendererRegistry()
+    const viewerContentProviders = new FileViewerContentRegistry()
 
     // -----------------------------------------------------------------------
     // Plugin body
@@ -2328,7 +2400,7 @@ window.__ModuleLoader__.load({
     function apply(ctx: HostCtxLike): void {
       const t = ctx.locale.bind(NS)
       const sessions = ctx.get<SessionsLike>('sessions')
-      const api = createApi(ctx, sessions)
+      const api = createApi(ctx, sessions, viewerContentProviders)
 
       // Remember every known workspace root so relative chip paths can be
       // resolved even when the current session's cwd differs.
@@ -2360,6 +2432,7 @@ window.__ModuleLoader__.load({
 
       ctx.provide('fileViewer', {
         openFile: (path: string, options?: OpenOptions) => api.openFile(path, options),
+        registerContentProvider: api.registerContentProvider,
         stat: api.stat,
         readRange: api.readRange,
         readHead: api.readHead,

@@ -2,7 +2,9 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { mkdtemp, writeFile, mkdir, rm, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FileViewerService, type FsLike } from '../src/server/file-service.js'
+import { FileViewerService } from '../src/server/file-service.js'
+import { FileViewerContentRegistry, type FileViewerContentProvider } from '../src/server/content-provider.js'
+import { LocalFileContentProvider, type FsLike } from '../src/server/local-file-provider.js'
 import { isPathInside } from '../src/core/paths.js'
 
 let root: string
@@ -46,11 +48,12 @@ beforeAll(async () => {
   await mkdir(join(root, 'sub'))
   await writeFile(join(root, 'sub', 'deep.txt'), 'deep')
   await writeFile(join(root, 'big.bin'), Buffer.alloc(1000, 7))
-  service = new FileViewerService({
+  const providers = new FileViewerContentRegistry()
+  providers.register(new LocalFileContentProvider({
     fs: fakeFs(root),
     roots: [root],
-    cwd: root,
-  })
+  }))
+  service = new FileViewerService({ providers })
 })
 
 afterAll(async () => {
@@ -144,5 +147,73 @@ describe('file-viewer service', () => {
     const result = await call('nope', {})
     expect(result.ok).toBe(false)
     expect((result.error as { message?: string }).message).toMatch(/Unknown endpoint/)
+  })
+})
+
+describe('registered content providers', () => {
+  const locator = 'artifact://run-42/report.json'
+  const bytes = new TextEncoder().encode('{"ok":true}')
+  const provider: FileViewerContentProvider = {
+    id: 'test-artifacts',
+    supports: (candidate) => candidate.startsWith('artifact://'),
+    async stat(candidate) {
+      if (candidate !== locator) return undefined
+      return { name: 'report.json', mime: 'application/json', size: bytes.byteLength }
+    },
+    async read(candidate, request) {
+      if (candidate !== locator) throw new Error('missing artifact')
+      return bytes.slice(request.offset, request.offset + request.length)
+    },
+  }
+
+  it('reads non-filesystem content through a registered provider', async () => {
+    const providers = new FileViewerContentRegistry()
+    providers.register(provider)
+    const virtualService = new FileViewerService({ providers })
+    const signal = new AbortController().signal
+
+    const statResult = await virtualService.handle('stat', { path: locator }, signal)
+    expect(statResult).toEqual({
+      ok: true,
+      value: {
+        path: locator,
+        name: 'report.json',
+        ext: 'json',
+        mime: 'application/json',
+        size: bytes.byteLength,
+        mtimeMs: undefined,
+        isDirectory: false,
+        exists: true,
+      },
+    })
+
+    const rangeResult = await virtualService.handle('readRange', { path: locator, offset: 2, length: 4 }, signal)
+    expect(rangeResult.ok).toBe(true)
+    const value = (rangeResult as { ok: true; value: { data: string; size: number } }).value
+    expect(decode(value.data)).toBe('ok":')
+    expect(value.size).toBe(bytes.byteLength)
+  })
+
+  it('unregisters providers cleanly', async () => {
+    const providers = new FileViewerContentRegistry()
+    const unregister = providers.register(provider)
+    unregister()
+    const virtualService = new FileViewerService({ providers })
+    const result = await virtualService.handle('stat', { path: locator }, new AbortController().signal)
+    expect(result.ok).toBe(false)
+    expect((result as { ok: false; error: { message: string } }).error.message).toMatch(/No content provider/)
+  })
+
+  it('prefers a custom provider over a later fallback registration', () => {
+    const providers = new FileViewerContentRegistry()
+    providers.register(provider)
+    providers.register({
+      id: 'broad-fallback',
+      priority: -1000,
+      supports: () => true,
+      async stat() { return undefined },
+      async read() { return new Uint8Array() },
+    })
+    expect(providers.resolve(locator)).toBe(provider)
   })
 })
