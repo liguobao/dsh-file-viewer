@@ -1,0 +1,56 @@
+# CI for dsh-file-viewer
+#
+# Every push / PR: install → type-check → unit tests → build dist (node half +
+# client bundle) → package the installable tarball → upload as artifact.
+#
+# Tag releases are handled by .github/workflows/release.yml (which attaches the
+# built dist to a GitHub Release). This workflow deliberately does NOT run on
+# v* tags so the two never race.
+#
+# `dist/` stays gitignored — it is a build product, produced here and by the
+# `prepare` script on install.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: check · test · build · pack
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check (strict, src + tests)
+        run: npm run check
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build bundles (dist/index.js + dist/client.js)
+        run: npm run build
+
+      - name: Package installable tarball
+        run: npm pack --pack-destination dist
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-file-viewer-dist
+          path: |
+            dist/
+            *.tgz
+          retention-days: 14
+
