@@ -1,6 +1,10 @@
 # DSH File Viewer
 
-A universal file preview layer for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness):
+English | [中文](README.zh.md)
+
+**Online:** [dsh.r2049.cn](https://dsh.r2049.cn)
+
+A universal, read-only file preview layer for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness):
 open and inspect files right inside the web UI — no external application needed.
 
 > **Preview ≠ Execute.** The viewer is strictly read-only: previewing a file never

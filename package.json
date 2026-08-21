@@ -1,13 +1,13 @@
 {
   "name": "dsh-file-viewer",
-  "version": "0.2.2",
-  "description": "DSH File Viewer — a universal file preview layer for DeepSeek Harness (images, PDF, CSV, text/log, markdown, JSON, YAML, source code).",
+  "version": "0.2.3",
+  "description": "Read-only file previews inside DeepSeek Harness for images, PDF, CSV, Markdown, JSON, YAML, source code, and large files.",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/liguobao/dsh-file-viewer.git"
   },
-  "homepage": "https://github.com/liguobao/dsh-file-viewer#readme",
+  "homepage": "https://dsh.r2049.cn",
   "bugs": {
     "url": "https://github.com/liguobao/dsh-file-viewer/issues"
   },
@@ -38,6 +38,7 @@
     "dist",
     "cordis.patch.yml",
     "README.md",
+    "README.zh.md",
     "LICENSE"
   ],
   "dsh": {
