@@ -130,6 +130,8 @@ window.__ModuleLoader__.load({
     }
 
     const inject = ['connection', 'slots', 'locale', 'sessions', 'workspaces']
+    const SAVE_AS_DEFAULT_MAX_BYTES = 100 * 1024 * 1024
+    const SAVE_AS_CHUNK_BYTES = 512 * 1024
 
     // -----------------------------------------------------------------------
     // Locales
@@ -146,6 +148,11 @@ window.__ModuleLoader__.load({
       openExternal: '在外部打开',
       revealInExplorer: '在资源管理器中显示',
       copyPath: '复制路径',
+      saveAs: '另存为',
+      saveAsUnavailable: '仅支持 {size} 以内文件另存，远程文件还需要 LAN、P2P 或 TURN 连接。',
+      saveAsProgress: '正在另存 {percent}%',
+      saveAsDone: '已另存',
+      saveAsFailed: '另存失败：{reason}',
       close: '关闭',
       loading: '加载中…',
       previewUnavailable: '无法预览',
@@ -227,6 +234,11 @@ window.__ModuleLoader__.load({
       openExternal: 'Open externally',
       revealInExplorer: 'Reveal in Explorer',
       copyPath: 'Copy path',
+      saveAs: 'Save as',
+      saveAsUnavailable: 'Save As is limited to files up to {size}. Remote files also require a LAN, P2P, or TURN connection.',
+      saveAsProgress: 'Saving {percent}%',
+      saveAsDone: 'Saved',
+      saveAsFailed: 'Save failed: {reason}',
       close: 'Close',
       loading: 'Loading…',
       previewUnavailable: 'Preview unavailable',
@@ -330,6 +342,7 @@ window.__ModuleLoader__.load({
       status: string
       error: string | null
       loading: boolean
+      saving: boolean
       reloadNonce: number
       /** Whether the sniffed head marks the file as binary (NUL bytes). */
       binary: boolean
@@ -348,6 +361,7 @@ window.__ModuleLoader__.load({
       status: '',
       error: null,
       loading: false,
+      saving: false,
       reloadNonce: 0,
       binary: false,
       browsePath: null,
@@ -466,6 +480,9 @@ window.__ModuleLoader__.load({
       readHead(path: string, maxBytes: number): Promise<{ data: string; size: number; truncated: boolean }>
       list(path: string): Promise<{ path: string; entries: Array<{ name: string; path: string; isDirectory: boolean; size?: number; mtimeMs?: number }> }>
       openExternal(path: string): Promise<{ opened: true }>
+      saveAsLimit(path: string): { allowed: boolean; maxBytes: number }
+      canSaveAs(path: string, size: number): boolean
+      saveAs(file: FileInfo, onProgress: (received: number, total: number) => void): Promise<void>
       dataUrl(path: string, mime: string): Promise<string>
     }
 
@@ -550,6 +567,56 @@ window.__ModuleLoader__.load({
         return { opened: true }
       }
 
+      const saveAsLimit = (path: string): { allowed: boolean; maxBytes: number } => {
+        const provider = contentProviders.resolve(path)
+        const decision = provider?.saveAsAllowed?.(path)
+        if (decision === false) return { allowed: false, maxBytes: SAVE_AS_DEFAULT_MAX_BYTES }
+        if (typeof decision === 'object') {
+          const maxBytes = decision.maxBytes
+          return {
+            allowed: decision.allowed,
+            maxBytes: Number.isSafeInteger(maxBytes) && maxBytes !== undefined && maxBytes > 0 ? maxBytes : SAVE_AS_DEFAULT_MAX_BYTES,
+          }
+        }
+        return { allowed: true, maxBytes: SAVE_AS_DEFAULT_MAX_BYTES }
+      }
+
+      const canSaveAs = (path: string, size: number): boolean => {
+        const limit = saveAsLimit(path)
+        return limit.allowed && size <= limit.maxBytes
+      }
+
+      const saveAs = async (file: FileInfo, onProgress: (received: number, total: number) => void): Promise<void> => {
+        const initialLimit = saveAsLimit(file.path)
+        if (!initialLimit.allowed || file.size > initialLimit.maxBytes) throw new Error('Save As is unavailable for this file.')
+        const chunks: BlobPart[] = []
+        let received = 0
+        while (received < file.size) {
+          const currentLimit = saveAsLimit(file.path)
+          if (!currentLimit.allowed || file.size > currentLimit.maxBytes) throw new Error('Save As is unavailable for this file.')
+          const length = Math.min(SAVE_AS_CHUNK_BYTES, file.size - received)
+          const range = await readRange(file.path, received, length)
+          if (range.offset !== received) throw new Error('The file source returned a mismatched range.')
+          if (range.size > saveAsLimit(file.path).maxBytes) throw new Error('The file is larger than the Save As limit.')
+          const bytes = decodeBase64(range.data)
+          if (bytes.byteLength === 0 && !range.eof) throw new Error('The file source returned an empty range.')
+          chunks.push(new Uint8Array(bytes))
+          received += bytes.byteLength
+          onProgress(received, file.size)
+          if (range.eof || bytes.byteLength === 0) break
+        }
+        const blob = new Blob(chunks, { type: file.mime || 'application/octet-stream' })
+        const link = document.createElement('a')
+        const url = URL.createObjectURL(blob)
+        link.href = url
+        link.download = file.name || basename(file.path) || 'download'
+        link.style.display = 'none'
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
+      }
+
       const currentCwd = (): string | undefined => {
         const snapshot = sessions?.list.getSnapshot()
         return snapshot?.byId === undefined ? undefined : Object.values(snapshot.byId).find((session) => session?.cwd !== undefined)?.cwd
@@ -601,6 +668,9 @@ window.__ModuleLoader__.load({
         readHead,
         list,
         openExternal,
+        saveAsLimit,
+        canSaveAs,
+        saveAs,
         dataUrl: async (path, mime) => {
           const range = await readRange(path, 0, 50 * 1024 * 1024)
           return `data:${mime};base64,${range.data}`
@@ -730,6 +800,19 @@ window.__ModuleLoader__.load({
         const current = viewerStore.get().file
         if (current !== null) void navigator.clipboard?.writeText(current.path)
       }
+      const saveAs = (): void => {
+        const current = viewerStore.get().file
+        if (current === null || viewerStore.get().saving) return
+        viewerStore.set({ saving: true, status: t('saveAsProgress', { percent: 0 }) })
+        void api.saveAs(current, (received, total) => {
+          const percent = total <= 0 ? 100 : Math.min(100, Math.floor((received / total) * 100))
+          viewerStore.set({ status: t('saveAsProgress', { percent }) })
+        }).then(() => {
+          viewerStore.set({ saving: false, status: t('saveAsDone') })
+        }).catch((error) => {
+          viewerStore.set({ saving: false, status: t('saveAsFailed', { reason: messageOf(error) }) })
+        })
+      }
 
       // Title row inside the view: the path/filename on the left stays
       // visible the whole time (browse shows the current directory, preview
@@ -738,6 +821,11 @@ window.__ModuleLoader__.load({
       const titleLabel = file !== null
         ? file.path
         : state.browsePath ?? t('panelTitle')
+      const saveAsLimit = file !== null ? api.saveAsLimit(file.path) : null
+      const saveAsAvailable = file !== null && saveAsLimit !== null && saveAsLimit.allowed && file.size <= saveAsLimit.maxBytes
+      const saveAsUnavailableTitle = saveAsLimit !== null
+        ? t('saveAsUnavailable', { size: formatBytes(saveAsLimit.maxBytes) })
+        : t('saveAs')
 
       return React.createElement(
         'section',
@@ -771,6 +859,7 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'dsfv-titlebar-actions' },
             file !== null && React.createElement(ToolbarButton, { label: t('refresh'), onClick: refresh }),
+            file !== null && React.createElement(ToolbarButton, { label: t('saveAs'), title: saveAsAvailable ? t('saveAs') : saveAsUnavailableTitle, disabled: state.saving || !saveAsAvailable, onClick: saveAs }),
             file !== null && React.createElement(ToolbarButton, { label: t('openExternal'), onClick: openExternal }),
             file !== null && React.createElement(ToolbarButton, { label: t('copyPath'), onClick: copyPath }),
             React.createElement(

@@ -29604,7 +29604,7 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
         __webpack_exports__GlobalWorkerOptions.workerPort = new Worker(URL.createObjectURL(workerBlob), { type: "module" });
       } catch {
       }
-      let inject = ["connection", "slots", "locale", "sessions", "workspaces"], NS = "fileViewer", zh = {
+      let inject = ["connection", "slots", "locale", "sessions", "workspaces"], SAVE_AS_DEFAULT_MAX_BYTES = 100 * 1024 * 1024, SAVE_AS_CHUNK_BYTES = 512 * 1024, NS = "fileViewer", zh = {
         panelTitle: "\u6587\u4EF6\u67E5\u770B\u5668",
         viewFile: "\u6587\u4EF6\u67E5\u770B\u5668",
         backToBrowser: "\u8FD4\u56DE\u4E0A\u4E00\u7EA7",
@@ -29615,6 +29615,11 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
         openExternal: "\u5728\u5916\u90E8\u6253\u5F00",
         revealInExplorer: "\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u663E\u793A",
         copyPath: "\u590D\u5236\u8DEF\u5F84",
+        saveAs: "\u53E6\u5B58\u4E3A",
+        saveAsUnavailable: "\u4EC5\u652F\u6301 {size} \u4EE5\u5185\u6587\u4EF6\u53E6\u5B58\uFF0C\u8FDC\u7A0B\u6587\u4EF6\u8FD8\u9700\u8981 LAN\u3001P2P \u6216 TURN \u8FDE\u63A5\u3002",
+        saveAsProgress: "\u6B63\u5728\u53E6\u5B58 {percent}%",
+        saveAsDone: "\u5DF2\u53E6\u5B58",
+        saveAsFailed: "\u53E6\u5B58\u5931\u8D25\uFF1A{reason}",
         close: "\u5173\u95ED",
         loading: "\u52A0\u8F7D\u4E2D\u2026",
         previewUnavailable: "\u65E0\u6CD5\u9884\u89C8",
@@ -29695,6 +29700,11 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
         openExternal: "Open externally",
         revealInExplorer: "Reveal in Explorer",
         copyPath: "Copy path",
+        saveAs: "Save as",
+        saveAsUnavailable: "Save As is limited to files up to {size}. Remote files also require a LAN, P2P, or TURN connection.",
+        saveAsProgress: "Saving {percent}%",
+        saveAsDone: "Saved",
+        saveAsFailed: "Save failed: {reason}",
         close: "Close",
         loading: "Loading\u2026",
         previewUnavailable: "Preview unavailable",
@@ -29786,6 +29796,7 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
         status: "",
         error: null,
         loading: !1,
+        saving: !1,
         reloadNonce: 0,
         binary: !1,
         browsePath: null,
@@ -29896,6 +29907,36 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
           if (provider === void 0) return rpcCall("openExternal", { path });
           if (provider.openExternal === void 0) throw new Error(`Content provider "${provider.id}" does not support external open.`);
           return await provider.openExternal(path, new AbortController().signal), { opened: !0 };
+        }, saveAsLimit = (path) => {
+          let decision = contentProviders.resolve(path)?.saveAsAllowed?.(path);
+          if (decision === !1) return { allowed: !1, maxBytes: SAVE_AS_DEFAULT_MAX_BYTES };
+          if (typeof decision == "object") {
+            let maxBytes = decision.maxBytes;
+            return {
+              allowed: decision.allowed,
+              maxBytes: Number.isSafeInteger(maxBytes) && maxBytes !== void 0 && maxBytes > 0 ? maxBytes : SAVE_AS_DEFAULT_MAX_BYTES
+            };
+          }
+          return { allowed: !0, maxBytes: SAVE_AS_DEFAULT_MAX_BYTES };
+        }, canSaveAs = (path, size) => {
+          let limit = saveAsLimit(path);
+          return limit.allowed && size <= limit.maxBytes;
+        }, saveAs = async (file, onProgress) => {
+          let initialLimit = saveAsLimit(file.path);
+          if (!initialLimit.allowed || file.size > initialLimit.maxBytes) throw new Error("Save As is unavailable for this file.");
+          let chunks = [], received = 0;
+          for (; received < file.size; ) {
+            let currentLimit = saveAsLimit(file.path);
+            if (!currentLimit.allowed || file.size > currentLimit.maxBytes) throw new Error("Save As is unavailable for this file.");
+            let length = Math.min(SAVE_AS_CHUNK_BYTES, file.size - received), range = await readRange(file.path, received, length);
+            if (range.offset !== received) throw new Error("The file source returned a mismatched range.");
+            if (range.size > saveAsLimit(file.path).maxBytes) throw new Error("The file is larger than the Save As limit.");
+            let bytes = decodeBase64(range.data);
+            if (bytes.byteLength === 0 && !range.eof) throw new Error("The file source returned an empty range.");
+            if (chunks.push(new Uint8Array(bytes)), received += bytes.byteLength, onProgress(received, file.size), range.eof || bytes.byteLength === 0) break;
+          }
+          let blob = new Blob(chunks, { type: file.mime || "application/octet-stream" }), link2 = document.createElement("a"), url = URL.createObjectURL(blob);
+          link2.href = url, link2.download = file.name || basename(file.path) || "download", link2.style.display = "none", document.body.appendChild(link2), link2.click(), link2.remove(), window.setTimeout(() => URL.revokeObjectURL(url), 3e4);
         }, currentCwd = () => {
           let snapshot = sessions?.list.getSnapshot();
           return snapshot?.byId === void 0 ? void 0 : Object.values(snapshot.byId).find((session) => session?.cwd !== void 0)?.cwd;
@@ -29937,6 +29978,9 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
           readHead,
           list: list2,
           openExternal,
+          saveAsLimit,
+          canSaveAs,
+          saveAs,
           dataUrl: async (path, mime) => {
             let range = await readRange(path, 0, 52428800);
             return `data:${mime};base64,${range.data}`;
@@ -30023,7 +30067,17 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
         }, copyPath = () => {
           let current = viewerStore.get().file;
           current !== null && navigator.clipboard?.writeText(current.path);
-        }, titleLabel = file !== null ? file.path : state.browsePath ?? t("panelTitle");
+        }, saveAs = () => {
+          let current = viewerStore.get().file;
+          current === null || viewerStore.get().saving || (viewerStore.set({ saving: !0, status: t("saveAsProgress", { percent: 0 }) }), api.saveAs(current, (received, total) => {
+            let percent = total <= 0 ? 100 : Math.min(100, Math.floor(received / total * 100));
+            viewerStore.set({ status: t("saveAsProgress", { percent }) });
+          }).then(() => {
+            viewerStore.set({ saving: !1, status: t("saveAsDone") });
+          }).catch((error2) => {
+            viewerStore.set({ saving: !1, status: t("saveAsFailed", { reason: messageOf(error2) }) });
+          }));
+        }, titleLabel = file !== null ? file.path : state.browsePath ?? t("panelTitle"), saveAsLimit = file !== null ? api.saveAsLimit(file.path) : null, saveAsAvailable = file !== null && saveAsLimit !== null && saveAsLimit.allowed && file.size <= saveAsLimit.maxBytes, saveAsUnavailableTitle = saveAsLimit !== null ? t("saveAsUnavailable", { size: formatBytes(saveAsLimit.maxBytes) }) : t("saveAs");
         return React.createElement(
           "section",
           {
@@ -30054,6 +30108,7 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
               "div",
               { className: "dsfv-titlebar-actions" },
               file !== null && React.createElement(ToolbarButton, { label: t("refresh"), onClick: refresh }),
+              file !== null && React.createElement(ToolbarButton, { label: t("saveAs"), title: saveAsAvailable ? t("saveAs") : saveAsUnavailableTitle, disabled: state.saving || !saveAsAvailable, onClick: saveAs }),
               file !== null && React.createElement(ToolbarButton, { label: t("openExternal"), onClick: openExternal }),
               file !== null && React.createElement(ToolbarButton, { label: t("copyPath"), onClick: copyPath }),
               React.createElement(

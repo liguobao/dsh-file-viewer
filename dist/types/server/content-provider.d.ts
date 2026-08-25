@@ -35,6 +35,11 @@ export interface FileViewerContentProvider {
     list?(locator: string, signal: AbortSignal): Promise<FileViewerContentEntry[]>;
     /** Optional hand-off to a native/external application. */
     openExternal?(locator: string, signal: AbortSignal): Promise<void>;
+    /** Whether File Viewer may offer browser-side Save As for this locator. */
+    saveAsAllowed?(locator: string): boolean | {
+        allowed: boolean;
+        maxBytes?: number;
+    };
 }
 /**
  * Runtime registry exposed to other host plugins as `fileViewerContent`.
