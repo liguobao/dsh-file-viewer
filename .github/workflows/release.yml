@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   id-token: write
+  packages: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -89,6 +90,45 @@ jobs:
           else
             npm publish --provenance --access public
           fi
+
+      - name: Set up Node.js for GitHub Packages
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@liguobao'
+
+      - name: Publish GitHub Packages npm package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          PACKAGE_NAME="@${OWNER}/dsh-file-viewer"
+          echo "Checking if $PACKAGE_NAME@$VERSION already exists on GitHub Packages..."
+          if npm view "$PACKAGE_NAME"@"$VERSION" --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "Version already exists on GitHub Packages, skip publish."
+            exit 0
+          fi
+
+          mkdir -p github-package
+          tar -xzf "release-assets/dsh-file-viewer-$VERSION.tgz" -C github-package
+          node --input-type=module <<'NODE'
+          import { readFile, writeFile } from 'node:fs/promises'
+
+          const manifestPath = 'github-package/package/package.json'
+          const pkg = JSON.parse(await readFile(manifestPath, 'utf8'))
+          const owner = process.env.GITHUB_REPOSITORY_OWNER.toLowerCase()
+          const unscopedName = pkg.name.replace(/^@[^/]+\//, '')
+          pkg.name = `@${owner}/${unscopedName}`
+          pkg.publishConfig = {
+            ...(pkg.publishConfig ?? {}),
+            registry: 'https://npm.pkg.github.com',
+          }
+          await writeFile(manifestPath, `${JSON.stringify(pkg, null, 2)}\n`)
+          NODE
+
+          npm publish github-package/package --ignore-scripts
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
