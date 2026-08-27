@@ -7,14 +7,15 @@
 /** Reject unsafe request inputs before they reach the host. */
 export declare function normalizeRequestPath(input: unknown): string;
 /**
- * Lexical containment test (POSIX): is `candidate` equal to `root` or inside
- * it? Dot segments (`.`, `..`) are resolved before comparing. The host uses
- * realpath+contains as the final authority; this is the portable pre-check
- * and the unit-test surface for boundary logic.
+ * Lexical containment test: is `candidate` equal to `root` or inside it?
+ * Dot segments (`.`, `..`) are resolved before comparing. Windows-looking
+ * paths are compared case-insensitively to match drive-letter behavior.
  */
 export declare function isPathInside(root: string, candidate: string): boolean;
 /** Normalize separators to forward slashes and collapse duplicate slashes. */
 export declare function normalizeSeparators(path: string): string;
+/** True for absolute local paths, including Windows drive-letter paths. */
+export declare function isAbsoluteLocalPath(path: string): boolean;
 /** Check a candidate path against a list of allowed roots (any root passes). */
 export declare function isInsideAnyRoot(roots: readonly string[], candidate: string): boolean;
 /** Join segments safely: the result must stay inside `root`. */

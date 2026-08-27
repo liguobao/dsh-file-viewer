@@ -21,17 +21,15 @@ export function normalizeRequestPath(input: unknown): string {
 }
 
 /**
- * Lexical containment test (POSIX): is `candidate` equal to `root` or inside
- * it? Dot segments (`.`, `..`) are resolved before comparing. The host uses
- * realpath+contains as the final authority; this is the portable pre-check
- * and the unit-test surface for boundary logic.
+ * Lexical containment test: is `candidate` equal to `root` or inside it?
+ * Dot segments (`.`, `..`) are resolved before comparing. Windows-looking
+ * paths are compared case-insensitively to match drive-letter behavior.
  */
 export function isPathInside(root: string, candidate: string): boolean {
-  const r = resolveSegments(root)
-  const c = resolveSegments(candidate)
-  if (c.join('/') === r.join('/')) return true
-  const prefix = r.join('/')
-  return c.join('/').startsWith(`${prefix}/`)
+  const r = comparisonPath(root)
+  const c = comparisonPath(candidate)
+  if (c === r) return true
+  return c.startsWith(`${r}/`)
 }
 
 /** Resolve `.`/`..` segments lexically (no filesystem access). */
@@ -52,6 +50,12 @@ function resolveSegments(path: string): string[] {
 /** Normalize separators to forward slashes and collapse duplicate slashes. */
 export function normalizeSeparators(path: string): string {
   return path.replace(/\\/g, '/').replace(/\/{2,}/g, '/')
+}
+
+/** True for absolute local paths, including Windows drive-letter paths. */
+export function isAbsoluteLocalPath(path: string): boolean {
+  const normalized = normalizeSeparators(path)
+  return normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized)
 }
 
 /** Check a candidate path against a list of allowed roots (any root passes). */
@@ -75,4 +79,13 @@ export function safeJoin(root: string, ...segments: string[]): string {
 export function hasTraversal(path: string): boolean {
   const segments = normalizeSeparators(path).split('/')
   return segments.includes('..')
+}
+
+function comparisonPath(path: string): string {
+  const normalized = resolveSegments(path).join('/')
+  return isWindowsLikePath(path) ? normalized.toLowerCase() : normalized
+}
+
+function isWindowsLikePath(path: string): boolean {
+  return /^[A-Za-z]:[/\\]/.test(path) || path.startsWith('\\\\') || path.startsWith('//')
 }

@@ -141,8 +141,34 @@ function normalizeRequestPath(input) {
   }
   return trimmed;
 }
+function isPathInside(root, candidate) {
+  const r = comparisonPath(root);
+  const c = comparisonPath(candidate);
+  if (c === r) return true;
+  return c.startsWith(`${r}/`);
+}
+function resolveSegments(path) {
+  const segments = normalizeSeparators(path).split("/");
+  const out = [];
+  for (const segment of segments) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      out.pop();
+      continue;
+    }
+    out.push(segment);
+  }
+  return out;
+}
 function normalizeSeparators(path) {
   return path.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+}
+function comparisonPath(path) {
+  const normalized = resolveSegments(path).join("/");
+  return isWindowsLikePath(path) ? normalized.toLowerCase() : normalized;
+}
+function isWindowsLikePath(path) {
+  return /^[A-Za-z]:[/\\]/.test(path) || path.startsWith("\\\\") || path.startsWith("//");
 }
 
 // src/server/file-service.ts
@@ -399,7 +425,7 @@ var LocalFileContentProvider = class {
       } catch {
         continue;
       }
-      if (this.options.fs.contains(rootTarget, target)) {
+      if (this.options.fs.contains(rootTarget, target) || isPathInside(rootTarget.targetKey, target.targetKey)) {
         return { target, path: this.options.fs.processPath(target) };
       }
     }

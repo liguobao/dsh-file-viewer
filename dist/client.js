@@ -1470,6 +1470,13 @@ https://github.com/highlightjs/highlight.js/issues/2277`), languageName = codeOr
       throw new Error("The path is too long.");
     return trimmed;
   }
+  function normalizeSeparators(path) {
+    return path.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  }
+  function isAbsoluteLocalPath(path) {
+    let normalized = normalizeSeparators(path);
+    return normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized);
+  }
 
   // src/core/format.ts
   function basename(path) {
@@ -29825,7 +29832,7 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
           }, attempt * 120);
       }
       function resolveWorkspacePath(cwd, path) {
-        return /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(path) || path.startsWith("/") || /^[A-Za-z]:[/\\]/.test(path) || path.startsWith("\\\\") || cwd === void 0 || cwd === "" ? path : `${cwd.replace(/[/\\]+$/, "")}/${path.replace(/^[/\\]+/, "")}`;
+        return /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(path) || isAbsoluteLocalPath(path) || cwd === void 0 || cwd === "" ? path : `${cwd.replace(/[/\\]+$/, "")}/${path.replace(/^[/\\]+/, "")}`;
       }
       function decodeBase64(base64) {
         let binary = atob(base64), bytes = new Uint8Array(binary.length);
@@ -31044,7 +31051,7 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
         let paths = [], seen = /* @__PURE__ */ new Set(), push = (candidate) => {
           let trimmed = candidate.trim().replace(/[.,;:!?)\]'"]+$/, "");
           if (trimmed === "" || !trimmed.includes("/") || /^(https?:|data:|blob:|file:|javascript:)/.test(trimmed) || /[\s\\]/.test(trimmed)) return;
-          let hasExt = /\.[a-zA-Z0-9]{1,8}$/.test(trimmed), isAbs = trimmed.startsWith("/");
+          let hasExt = /\.[a-zA-Z0-9]{1,8}$/.test(trimmed), isAbs = isAbsoluteLocalPath(trimmed);
           !hasExt && !isAbs || seen.has(trimmed) || (seen.add(trimmed), paths.push(trimmed));
         };
         for (let block2 of blocks) {
@@ -31066,7 +31073,7 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
         let [existing, setExisting] = React.useState([]);
         return React.useEffect(() => {
           let active = !0, candidates = paths.map((path) => {
-            if (path.startsWith("/") || /^[A-Za-z]:[\/]/.test(path)) return [path];
+            if (isAbsoluteLocalPath(path)) return [path];
             let bases = [cwd];
             for (let root of knownWorkspaceRoots)
               root !== void 0 && root !== "" && !bases.includes(root) && bases.push(root);
@@ -31247,7 +31254,7 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
       function apply2(ctx) {
         let t = ctx.locale.bind(NS), sessions = ctx.get("sessions"), api = createApi(ctx, sessions, viewerContentProviders), workspaceItems = ctx.get("workspaces")?.list.getSnapshot().items ?? [];
         knownWorkspaceRoots.length = 0, knownWorkspaceRoots.push(...workspaceItems.map((workspace) => workspace.path)), window.__dsfvBrowseWorkspace = (workspaceIdOrPath) => {
-          let path = (ctx.get("workspaces")?.list.getSnapshot().items ?? []).find((workspace) => workspace.workspaceId === workspaceIdOrPath)?.path ?? (workspaceIdOrPath.startsWith("/") ? workspaceIdOrPath : void 0);
+          let path = (ctx.get("workspaces")?.list.getSnapshot().items ?? []).find((workspace) => workspace.workspaceId === workspaceIdOrPath)?.path ?? (isAbsoluteLocalPath(workspaceIdOrPath) ? workspaceIdOrPath : void 0);
           path !== void 0 && (viewerStore.set({ open: !0, mode: "browse", browsePath: path, browseEntries: null, browseError: null, file: null, error: null, loading: !1, status: "", binary: !1 }), activateFileViewerTab());
         }, ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-file-viewer: dictionaries"), ctx.effect(installStyle, "dsh-file-viewer: client styles"), ctx.provide("fileViewer", {
           openFile: (path, options) => api.openFile(path, options),

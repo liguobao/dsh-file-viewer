@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   normalizeRequestPath,
+  isAbsoluteLocalPath,
   isPathInside,
   isInsideAnyRoot,
   safeJoin,
@@ -49,5 +50,15 @@ describe('path validation', () => {
 
   it('normalizes windows separators', () => {
     expect(isPathInside('C:/workspace', 'C:\\workspace\\a.txt')).toBe(true)
+    expect(isPathInside('c:/workspace', 'C:\\Workspace\\a.txt')).toBe(true)
+    expect(isPathInside('C:/workspace', 'D:\\workspace\\a.txt')).toBe(false)
+    expect(isPathInside('/Workspace', '/workspace/a.txt')).toBe(false)
+  })
+
+  it('detects absolute local paths across platforms', () => {
+    expect(isAbsoluteLocalPath('/workspace/a.txt')).toBe(true)
+    expect(isAbsoluteLocalPath('C:\\workspace\\a.txt')).toBe(true)
+    expect(isAbsoluteLocalPath('C:/workspace/a.txt')).toBe(true)
+    expect(isAbsoluteLocalPath('notes/readme.md')).toBe(false)
   })
 })

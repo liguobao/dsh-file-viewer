@@ -11,8 +11,8 @@ let root: string
 let service: FileViewerService
 
 /** Minimal structural ctx.fs double over the real filesystem. */
-function fakeFs(base: string): FsLike {
-  return {
+function fakeFs(base: string, overrides: Partial<FsLike> = {}): FsLike {
+  const fs: FsLike = {
     async resolve(path) {
       return { targetKey: path, displayPath: path }
     },
@@ -38,6 +38,7 @@ function fakeFs(base: string): FsLike {
       }))
     },
   }
+  return { ...fs, ...overrides }
 }
 
 beforeAll(async () => {
@@ -118,6 +119,32 @@ describe('file-viewer service', () => {
   it('rejects path traversal escaping the root', async () => {
     const result = await call('stat', { path: join(root, '..', '..', 'etc', 'hostname') })
     expect(result.ok).toBe(false)
+  })
+
+  it('accepts Windows-style resolved keys inside the root when contains mismatches casing', async () => {
+    const file = join(root, 'notes.txt')
+    const providers = new FileViewerContentRegistry()
+    providers.register(new LocalFileContentProvider({
+      fs: fakeFs(root, {
+        async resolve(path) {
+          if (path === root) return { targetKey: 'c:\\workspace\\project', displayPath: root }
+          if (path === file) return { targetKey: 'C:\\Workspace\\Project\\notes.txt', displayPath: file }
+          return { targetKey: path, displayPath: path }
+        },
+        contains() {
+          return false
+        },
+        processPath(target) {
+          return target.displayPath ?? target.targetKey
+        },
+      }),
+      roots: [root],
+    }))
+    const windowsService = new FileViewerService({ providers })
+    const result = await windowsService.handle('stat', { path: file }, new AbortController().signal)
+
+    expect(result.ok).toBe(true)
+    expect((result as { ok: true; value: { name: string } }).value.name).toBe('notes.txt')
   })
 
   it('rejects malformed payloads', async () => {

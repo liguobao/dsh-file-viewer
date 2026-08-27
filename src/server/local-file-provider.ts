@@ -3,6 +3,7 @@
 import { open, stat as fsStat } from 'node:fs/promises'
 import { basename } from '../core/format.js'
 import { mimeFromExtension } from '../core/mime.js'
+import { isPathInside } from '../core/paths.js'
 import type {
   FileViewerContentEntry,
   FileViewerContentMeta,
@@ -126,7 +127,7 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
       } catch {
         continue
       }
-      if (this.options.fs.contains(rootTarget, target)) {
+      if (this.options.fs.contains(rootTarget, target) || isPathInside(rootTarget.targetKey, target.targetKey)) {
         return { target, path: this.options.fs.processPath(target) }
       }
     }

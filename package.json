@@ -1,6 +1,6 @@
 {
   "name": "dsh-file-viewer",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Read-only file previews inside DeepSeek Harness for images, PDF, CSV, Markdown, JSON, YAML, source code, and large files.",
   "license": "MIT",
   "repository": {

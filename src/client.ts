@@ -25,7 +25,7 @@ import { RendererRegistry, buildFileInfo, type FileInfo, type OpenOptions } from
 import { initialLoadPlan, DEFAULT_CHUNK_BYTES, CSV_ROW_CAP } from './core/large-file.js'
 import { CsvStreamParser, detectDelimiter } from './core/csv.js'
 import { parseJson, scalarText } from './core/json.js'
-import { normalizeRequestPath } from './core/paths.js'
+import { isAbsoluteLocalPath, normalizeRequestPath } from './core/paths.js'
 import { basename, dirname, extname, formatBytes, formatClock } from './core/format.js'
 import { FileViewerContentRegistry, type FileViewerContentProvider } from './server/content-provider.js'
 import * as pdfjs from 'pdfjs-dist'
@@ -439,7 +439,7 @@ window.__ModuleLoader__.load({
       // Provider locators (for example artifact://run/report.json) are opaque
       // and must never be rewritten relative to the current workspace.
       if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(path)) return path
-      if (path.startsWith('/') || /^[A-Za-z]:[/\\]/.test(path) || path.startsWith('\\\\')) return path
+      if (isAbsoluteLocalPath(path)) return path
       if (cwd === undefined || cwd === '') return path
       return `${cwd.replace(/[/\\]+$/, '')}/${path.replace(/^[/\\]+/, '')}`
     }
@@ -2249,7 +2249,7 @@ window.__ModuleLoader__.load({
         // Require a file extension or an absolute path, so tool words
         // (edit, bash, cat ...) and prose fragments never become chips.
         const hasExt = /\.[a-zA-Z0-9]{1,8}$/.test(trimmed)
-        const isAbs = trimmed.startsWith('/')
+        const isAbs = isAbsoluteLocalPath(trimmed)
         if (!hasExt && !isAbs) return
         if (seen.has(trimmed)) return
         seen.add(trimmed)
@@ -2284,7 +2284,7 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         let active = true
         const candidates = paths.map((path) => {
-          const absolute = path.startsWith('/') || /^[A-Za-z]:[\/]/.test(path)
+          const absolute = isAbsoluteLocalPath(path)
           if (absolute) return [path]
           const bases = [cwd]
           for (const root of knownWorkspaceRoots) {
@@ -2518,7 +2518,7 @@ window.__ModuleLoader__.load({
         const workspaces = ctx.get<{ list: { getSnapshot(): { items: Array<{ workspaceId: string; path: string }> } } }>('workspaces')
         const items = workspaces?.list.getSnapshot().items ?? []
         const match = items.find((workspace) => workspace.workspaceId === workspaceIdOrPath)
-        const path = match?.path ?? (workspaceIdOrPath.startsWith('/') ? workspaceIdOrPath : undefined)
+        const path = match?.path ?? (isAbsoluteLocalPath(workspaceIdOrPath) ? workspaceIdOrPath : undefined)
         if (path === undefined) return
         viewerStore.set({ open: true, mode: 'browse', browsePath: path, browseEntries: null, browseError: null, file: null, error: null, loading: false, status: '', binary: false })
         activateFileViewerTab()
