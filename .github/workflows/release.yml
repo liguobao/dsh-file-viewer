@@ -128,7 +128,7 @@ jobs:
           await writeFile(manifestPath, `${JSON.stringify(pkg, null, 2)}\n`)
           NODE
 
-          npm publish github-package/package --ignore-scripts
+          npm publish ./github-package/package --ignore-scripts
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
