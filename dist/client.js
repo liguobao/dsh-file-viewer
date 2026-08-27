@@ -30162,6 +30162,17 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
           )
         );
       }
+      function browseCrumbs(path) {
+        let windows = path.match(/^([A-Za-z]:)([/\\]?)(.*)$/);
+        if (windows !== null) {
+          let separator2 = windows[2] === "\\" || path.includes("\\") ? "\\" : "/", drive = windows[1] ?? "", tail = (windows[3] ?? "").split(/[/\\]+/).filter(Boolean), crumbs = [{ path: `${drive}${separator2}`, label: drive, separator: separator2 }], current2 = `${drive}${separator2}`;
+          for (let part of tail)
+            current2 = current2.endsWith(separator2) ? `${current2}${part}` : `${current2}${separator2}${part}`, crumbs.push({ path: current2, label: part, separator: separator2 });
+          return crumbs;
+        }
+        let absolute = path.startsWith("/"), separator = "/", segments = path.split("/").filter(Boolean), current = "";
+        return segments.map((part) => (current = absolute ? `${current}/${part}` : current === "" ? part : `${current}/${part}`, { path: current, label: part, separator }));
+      }
       function DirectoryBrowser(props) {
         let { api, t } = props, state = useViewerState(), [busy, setBusy] = React.useState(!1), [error2, setError] = React.useState(null), workspaceRoot = props.useSessions?.((snapshot) => {
           let current = snapshot.current !== void 0 ? snapshot.byId?.[snapshot.current] : void 0;
@@ -30179,7 +30190,7 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
         React.useEffect(() => {
           state.mode === "browse" && state.browseEntries === null && state.browseError === null && openDirectory(state.browsePath);
         }, [state.mode, state.browsePath, workspaceRoot]);
-        let crumbs = (state.browsePath ?? workspaceRoot ?? "").split("/").filter(Boolean), rootLabel = t("browse");
+        let crumbs = browseCrumbs(state.browsePath ?? workspaceRoot ?? ""), rootLabel = t("browse");
         return React.createElement(
           "div",
           { className: "dsfv-browser" },
@@ -30190,15 +30201,15 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
               state.browsePath !== null && openDirectory(dirname(state.browsePath) || "/");
             } }),
             React.createElement("span", { className: "dsfv-crumb", onClick: () => openDirectory(null) }, rootLabel),
-            crumbs.map((part, index) => {
-              let path = `/${crumbs.slice(0, index + 1).join("/")}`, isLast = index === crumbs.length - 1;
+            crumbs.map((crumb, index) => {
+              let isLast = index === crumbs.length - 1;
               return React.createElement(
                 "span",
-                { key: path, className: `dsfv-crumb${isLast ? " isCurrent" : ""}`, onClick: () => {
-                  isLast || openDirectory(path);
+                { key: crumb.path, className: `dsfv-crumb${isLast ? " isCurrent" : ""}`, onClick: () => {
+                  isLast || openDirectory(crumb.path);
                 } },
-                React.createElement("span", { className: "dsfv-crumb-sep" }, "/"),
-                part
+                React.createElement("span", { className: "dsfv-crumb-sep" }, crumb.separator),
+                crumb.label
               );
             })
           ),

@@ -129,7 +129,7 @@ node scripts/patch-workspace-menu.mjs
 
 ## 安全说明
 
-- 可选的本地文件提供器会在 Host 端对真实路径执行允许根目录校验（`fs.contains`）。自定义提供器必须在自己的 locator 命名空间内负责授权。
+- 可选的本地文件提供器会在 Host 端对真实路径执行允许根目录校验（workspace 路径、已知 session cwd、Host cwd 和配置的额外 roots，经 `fs.contains` 校验）。自定义提供器必须在自己的 locator 命名空间内负责授权。
 - Markdown 使用 `html: false` 渲染，并通过 DOMPurify 移除脚本、iframe、事件处理器和 `javascript:` URL。
 - SVG 不会作为 HTML 注入，只通过 `<img>` 显示。
 - 插件会通过 NUL 扫描和魔数识别二进制文件；“作为文本打开”始终需要用户明确操作。

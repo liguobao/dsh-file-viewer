@@ -3,7 +3,7 @@
 import { open, stat as fsStat } from 'node:fs/promises'
 import { basename } from '../core/format.js'
 import { mimeFromExtension } from '../core/mime.js'
-import { isPathInside } from '../core/paths.js'
+import { isPathInside, normalizeRootPath } from '../core/paths.js'
 import type {
   FileViewerContentEntry,
   FileViewerContentMeta,
@@ -26,7 +26,10 @@ export interface FsLike {
 
 export interface ApiProxyLike {
   workspace: {
-    list(request: { rpcId: string; payload: object }): Promise<{ result: { ok: true; value: { items: Array<{ path: string }> } } }>
+    list(request: { rpcId: string; payload: object }): Promise<{ result: { ok: boolean; value?: { items: Array<{ path: string }> } } }>
+  }
+  sessions?: {
+    list(request: { rpcId: string; payload: object }): Promise<{ result: { ok: boolean; value?: { items: Array<{ cwd?: string }> } } }>
   }
   host: {
     openPath(request: { rpcId: string; payload: { path: string } }, signal?: AbortSignal): Promise<unknown>
@@ -35,7 +38,7 @@ export interface ApiProxyLike {
 
 export interface LocalFileContentProviderOptions {
   fs: FsLike
-  apiProxy?: ApiProxyLike
+  apiProxy?: ApiProxyLike | (() => ApiProxyLike | undefined)
   /** Absolute directory roots the provider may access. */
   roots: string[]
 }
@@ -109,8 +112,9 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
 
   async openExternal(locator: string, signal: AbortSignal): Promise<void> {
     const { path } = await this.resolveChecked(locator, signal)
-    if (this.options.apiProxy === undefined) throw new Error('External open is not available.')
-    await this.options.apiProxy.host.openPath({ rpcId: 'file-viewer-open', payload: { path } }, signal)
+    const apiProxy = this.currentApiProxy()
+    if (apiProxy === undefined) throw new Error('External open is not available.')
+    await apiProxy.host.openPath({ rpcId: 'file-viewer-open', payload: { path } }, signal)
   }
 
   private async resolveChecked(locator: string, signal: AbortSignal): Promise<{ target: FsTargetLike; path: string }> {
@@ -120,7 +124,7 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
     } catch (error) {
       throw new Error(`Cannot resolve locator: ${error instanceof Error ? error.message : String(error)}`)
     }
-    for (const root of this.options.roots) {
+    for (const root of await this.allowedRoots()) {
       let rootTarget: FsTargetLike
       try {
         rootTarget = await this.options.fs.resolve(root, { signal })
@@ -132,5 +136,40 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
       }
     }
     throw new Error('Access denied: the locator is outside the allowed workspaces.')
+  }
+
+  private async allowedRoots(): Promise<string[]> {
+    const roots = new Set(this.options.roots.map(normalizeRootPath).filter((root) => root !== ''))
+    const apiProxy = this.currentApiProxy()
+    if (apiProxy !== undefined) {
+      try {
+        const response = await apiProxy.workspace.list({ rpcId: 'file-viewer-roots', payload: {} })
+        if (response.result.ok && response.result.value !== undefined) {
+          for (const workspace of response.result.value.items) {
+            const root = normalizeRootPath(workspace.path)
+            if (root !== '') roots.add(root)
+          }
+        }
+      } catch {
+        // Fall back to static roots when the workspace service is temporarily unavailable.
+      }
+      try {
+        const response = await apiProxy.sessions?.list({ rpcId: 'file-viewer-session-roots', payload: {} })
+        if (response?.result.ok && response.result.value !== undefined) {
+          for (const session of response.result.value.items) {
+            if (session.cwd === undefined) continue
+            const root = normalizeRootPath(session.cwd)
+            if (root !== '') roots.add(root)
+          }
+        }
+      } catch {
+        // Session cwd roots are an opportunistic fallback for ungrouped sessions.
+      }
+    }
+    return [...roots]
+  }
+
+  private currentApiProxy(): ApiProxyLike | undefined {
+    return typeof this.options.apiProxy === 'function' ? this.options.apiProxy() : this.options.apiProxy
   }
 }

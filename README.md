@@ -170,7 +170,8 @@ update that reinstalls `@deepseek-ai/dsh-client-ui-workspace`.
 ## Security notes
 
 - Path validation is enforced host-side on realpath'd targets against allowed
-  roots (`fs.contains`) by the optional local-files provider. Custom providers
+  roots (workspace paths, known session cwd paths, the host cwd, and configured
+  extra roots via `fs.contains`) by the optional local-files provider. Custom providers
   are responsible for authorization within their own locator namespace.
 - Markdown is rendered with `html: false` and sanitized with DOMPurify
   (scripts, iframes, event handlers and `javascript:` URLs removed).

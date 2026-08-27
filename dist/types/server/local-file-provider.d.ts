@@ -28,10 +28,25 @@ export interface ApiProxyLike {
             payload: object;
         }): Promise<{
             result: {
-                ok: true;
-                value: {
+                ok: boolean;
+                value?: {
                     items: Array<{
                         path: string;
+                    }>;
+                };
+            };
+        }>;
+    };
+    sessions?: {
+        list(request: {
+            rpcId: string;
+            payload: object;
+        }): Promise<{
+            result: {
+                ok: boolean;
+                value?: {
+                    items: Array<{
+                        cwd?: string;
                     }>;
                 };
             };
@@ -48,7 +63,7 @@ export interface ApiProxyLike {
 }
 export interface LocalFileContentProviderOptions {
     fs: FsLike;
-    apiProxy?: ApiProxyLike;
+    apiProxy?: ApiProxyLike | (() => ApiProxyLike | undefined);
     /** Absolute directory roots the provider may access. */
     roots: string[];
 }
@@ -64,4 +79,6 @@ export declare class LocalFileContentProvider implements FileViewerContentProvid
     list(locator: string, signal: AbortSignal): Promise<FileViewerContentEntry[]>;
     openExternal(locator: string, signal: AbortSignal): Promise<void>;
     private resolveChecked;
+    private allowedRoots;
+    private currentApiProxy;
 }

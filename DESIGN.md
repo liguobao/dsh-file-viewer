@@ -102,7 +102,8 @@ re-provide `chatFileMentions`, which ui-deliverables owns).
   `ctx.workspaces.openPath(path)` (OS open), `ctx.sessions.list` (session
   cwd), `resolveWorkspacePath(cwd, path)` from `dsh-client-runtime/client`.
 - **Allowed roots** (host): every workspace path
-  (`ctx.apiProxy.workspace.list()`) + the host process cwd + configured extra
+  (`ctx.apiProxy.workspace.list()`), known session cwd paths
+  (`ctx.apiProxy.sessions.list()`), the host process cwd, and configured extra
   roots. `ctx.fs.resolve` + `contains` enforce the boundary (symlink-safe:
   resolve follows symlinks, so an inside symlink pointing outside fails the
   containment check).

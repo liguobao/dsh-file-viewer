@@ -915,7 +915,36 @@ window.__ModuleLoader__.load({
     // It starts at the current session's workspace root, so every listed
     // directory (and every opened file) stays inside the allowed roots.
     // -----------------------------------------------------------------------
+    interface BrowseCrumb { path: string; label: string; separator: string }
     interface SessionListSnapshot { byId?: Record<string, { cwd?: string } | undefined>; current?: string }
+
+    function browseCrumbs(path: string): BrowseCrumb[] {
+      const windows = path.match(/^([A-Za-z]:)([/\\]?)(.*)$/)
+      if (windows !== null) {
+        const separator = windows[2] === '\\' || path.includes('\\') ? '\\' : '/'
+        const drive = windows[1] ?? ''
+        const tail = (windows[3] ?? '').split(/[/\\]+/).filter(Boolean)
+        const crumbs: BrowseCrumb[] = [{ path: `${drive}${separator}`, label: drive, separator }]
+        let current = `${drive}${separator}`
+        for (const part of tail) {
+          current = current.endsWith(separator) ? `${current}${part}` : `${current}${separator}${part}`
+          crumbs.push({ path: current, label: part, separator })
+        }
+        return crumbs
+      }
+
+      const absolute = path.startsWith('/')
+      const separator = '/'
+      const segments = path.split('/').filter(Boolean)
+      let current = absolute ? '' : ''
+      return segments.map((part) => {
+        current = absolute
+          ? `${current}/${part}`
+          : current === '' ? part : `${current}/${part}`
+        return { path: current, label: part, separator }
+      })
+    }
+
     function DirectoryBrowser(props: { api: FileViewerApi; t: Translate; useSessions?: (selector: (snapshot: SessionListSnapshot) => string | undefined) => string | undefined }): React.ReactNode {
       const { api, t } = props
       const state = useViewerState()
@@ -955,7 +984,7 @@ window.__ModuleLoader__.load({
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [state.mode, state.browsePath, workspaceRoot])
 
-      const crumbs = (state.browsePath ?? workspaceRoot ?? '').split('/').filter(Boolean)
+      const crumbs = browseCrumbs(state.browsePath ?? workspaceRoot ?? '')
       const rootLabel = t('browse')
 
       return React.createElement(
@@ -966,14 +995,13 @@ window.__ModuleLoader__.load({
           { className: 'dsfv-browser-nav' },
           React.createElement(IconButton, { glyph: '↑', label: t('goUp'), disabled: state.browsePath === null || state.browsePath === '/', onClick: () => { if (state.browsePath !== null) openDirectory(dirname(state.browsePath) || '/') } }),
           React.createElement('span', { className: 'dsfv-crumb', onClick: () => openDirectory(null) }, rootLabel),
-          crumbs.map((part, index) => {
-            const path = `/${crumbs.slice(0, index + 1).join('/')}`
+          crumbs.map((crumb, index) => {
             const isLast = index === crumbs.length - 1
             return React.createElement(
               'span',
-              { key: path, className: `dsfv-crumb${isLast ? ' isCurrent' : ''}`, onClick: () => { if (!isLast) openDirectory(path) } },
-              React.createElement('span', { className: 'dsfv-crumb-sep' }, '/'),
-              part,
+              { key: crumb.path, className: `dsfv-crumb${isLast ? ' isCurrent' : ''}`, onClick: () => { if (!isLast) openDirectory(crumb.path) } },
+              React.createElement('span', { className: 'dsfv-crumb-sep' }, crumb.separator),
+              crumb.label,
             )
           }),
         ),

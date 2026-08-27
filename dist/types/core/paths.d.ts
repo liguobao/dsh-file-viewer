@@ -14,6 +14,8 @@ export declare function normalizeRequestPath(input: unknown): string;
 export declare function isPathInside(root: string, candidate: string): boolean;
 /** Normalize separators to forward slashes and collapse duplicate slashes. */
 export declare function normalizeSeparators(path: string): string;
+/** Trim and remove trailing separators from a root, preserving drive roots. */
+export declare function normalizeRootPath(path: string): string;
 /** True for absolute local paths, including Windows drive-letter paths. */
 export declare function isAbsoluteLocalPath(path: string): boolean;
 /** Check a candidate path against a list of allowed roots (any root passes). */

@@ -10,7 +10,7 @@ import s from '@deepseek-ai/schemastery'
 import { FileViewerService } from './server/file-service.js'
 import { FileViewerContentRegistry } from './server/content-provider.js'
 import { LocalFileContentProvider, type FsLike, type ApiProxyLike } from './server/local-file-provider.js'
-import { normalizeSeparators } from './core/paths.js'
+import { normalizeRootPath } from './core/paths.js'
 
 export const name = 'dsh-file-viewer'
 
@@ -28,7 +28,7 @@ export const Config: s<Config> = s.object({
 
 function resolveConfig(input: Config = {}): Required<Config> {
   const extraRoots = (input.extraRoots ?? [])
-    .map((root) => normalizeSeparators(root).replace(/\/+$/, ''))
+    .map(normalizeRootPath)
     .filter((root) => root !== '')
   return { enabled: input.enabled ?? true, extraRoots }
 }
@@ -106,7 +106,6 @@ async function activate(
   ctx.provide('fileViewerHost', service satisfies FileViewerHostService)
 
   const fs = ctx.get<FsLike>('fs')
-  const apiProxy = ctx.get<ApiProxyLike>('apiProxy')
   const connection = ctx.get<HostConnectionLike>('connection')
   if (connection?.rpc === undefined) {
     ctx.logger.warn('dsh-file-viewer: the connection RPC registry is unavailable; the viewer is disabled')
@@ -116,20 +115,10 @@ async function activate(
   let unregisterLocalFiles: (() => void) | undefined
   if (fs !== undefined) {
     const roots = new Set<string>([process.cwd(), ...merged.extraRoots])
-    if (apiProxy !== undefined) {
-      try {
-        const response = await apiProxy.workspace.list({ rpcId: 'file-viewer-roots', payload: {} })
-        if (response.result.ok) {
-          for (const workspace of response.result.value.items) roots.add(normalizeSeparators(workspace.path))
-        }
-      } catch (error) {
-        ctx.logger.warn('dsh-file-viewer: workspace list unavailable', error)
-      }
-    }
     unregisterLocalFiles = providers.register(new LocalFileContentProvider({
       fs,
-      apiProxy,
-      roots: [...roots].filter(Boolean),
+      apiProxy: () => ctx.get<ApiProxyLike>('apiProxy'),
+      roots: [...roots].map(normalizeRootPath).filter(Boolean),
     }))
   } else {
     ctx.logger.info('dsh-file-viewer: ctx.fs is unavailable; waiting for registered content providers')

@@ -25,5 +25,5 @@ export { classifySize, initialLoadPlan, allowWholeRead } from './core/large-file
 export { detectMime, mimeFromExtension, looksBinary } from './core/mime.js'
 export { parseCsv, detectDelimiter, CsvStreamParser } from './core/csv.js'
 export { parseJson, buildJsonTree, scalarText, getByPath } from './core/json.js'
-export { normalizeRequestPath, isAbsoluteLocalPath, isPathInside, isInsideAnyRoot, safeJoin, hasTraversal } from './core/paths.js'
+export { normalizeRequestPath, isAbsoluteLocalPath, isPathInside, isInsideAnyRoot, normalizeRootPath, safeJoin, hasTraversal } from './core/paths.js'
 export type { Config, FileViewerHostService }

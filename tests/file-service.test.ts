@@ -147,6 +147,111 @@ describe('file-viewer service', () => {
     expect((result as { ok: true; value: { name: string } }).value.name).toBe('notes.txt')
   })
 
+  it('accepts roots discovered from apiProxy at request time', async () => {
+    const file = join(root, 'notes.txt')
+    let apiProxyAvailable = false
+    const providers = new FileViewerContentRegistry()
+    providers.register(new LocalFileContentProvider({
+      fs: fakeFs(root),
+      apiProxy: () => apiProxyAvailable
+        ? {
+            workspace: {
+              async list() {
+                return { result: { ok: true, value: { items: [{ path: root }] } } }
+              },
+            },
+            host: {
+              async openPath() {
+                return undefined
+              },
+            },
+          }
+        : undefined,
+      roots: [],
+    }))
+    const dynamicService = new FileViewerService({ providers })
+
+    const denied = await dynamicService.handle('stat', { path: file }, new AbortController().signal)
+    expect(denied.ok).toBe(false)
+
+    apiProxyAvailable = true
+    const allowed = await dynamicService.handle('stat', { path: file }, new AbortController().signal)
+    expect(allowed.ok).toBe(true)
+    expect((allowed as { ok: true; value: { name: string } }).value.name).toBe('notes.txt')
+  })
+
+  it('accepts Windows roots discovered from apiProxy at request time', async () => {
+    const file = join(root, 'notes.txt')
+    const windowsRoot = 'c:\\workspace\\project\\'
+    const windowsFile = 'C:\\Workspace\\Project\\notes.txt'
+    const providers = new FileViewerContentRegistry()
+    providers.register(new LocalFileContentProvider({
+      fs: fakeFs(root, {
+        async resolve(path) {
+          if (path === windowsRoot.replace(/\\$/, '')) return { targetKey: 'c:\\workspace\\project', displayPath: root }
+          if (path === windowsRoot) return { targetKey: 'c:\\workspace\\project', displayPath: root }
+          if (path === windowsFile) return { targetKey: windowsFile, displayPath: file }
+          return { targetKey: path, displayPath: path }
+        },
+        contains() {
+          return false
+        },
+        processPath(target) {
+          return target.displayPath ?? target.targetKey
+        },
+      }),
+      apiProxy: {
+        workspace: {
+          async list() {
+            return { result: { ok: true, value: { items: [{ path: windowsRoot }] } } }
+          },
+        },
+        host: {
+          async openPath() {
+            return undefined
+          },
+        },
+      },
+      roots: [],
+    }))
+    const windowsService = new FileViewerService({ providers })
+    const result = await windowsService.handle('stat', { path: windowsFile }, new AbortController().signal)
+
+    expect(result.ok).toBe(true)
+    expect((result as { ok: true; value: { name: string } }).value.name).toBe('notes.txt')
+  })
+
+  it('accepts session cwd roots discovered from apiProxy at request time', async () => {
+    const file = join(root, 'notes.txt')
+    const providers = new FileViewerContentRegistry()
+    providers.register(new LocalFileContentProvider({
+      fs: fakeFs(root),
+      apiProxy: {
+        workspace: {
+          async list() {
+            return { result: { ok: true, value: { items: [] } } }
+          },
+        },
+        sessions: {
+          async list() {
+            return { result: { ok: true, value: { items: [{ cwd: root }] } } }
+          },
+        },
+        host: {
+          async openPath() {
+            return undefined
+          },
+        },
+      },
+      roots: [],
+    }))
+    const sessionCwdService = new FileViewerService({ providers })
+    const result = await sessionCwdService.handle('stat', { path: file }, new AbortController().signal)
+
+    expect(result.ok).toBe(true)
+    expect((result as { ok: true; value: { name: string } }).value.name).toBe('notes.txt')
+  })
+
   it('rejects malformed payloads', async () => {
     const result = await call('readRange', { path: join(root, 'notes.txt'), offset: -1, length: 5 })
     expect(result.ok).toBe(false)

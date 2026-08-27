@@ -52,6 +52,16 @@ export function normalizeSeparators(path: string): string {
   return path.replace(/\\/g, '/').replace(/\/{2,}/g, '/')
 }
 
+/** Trim and remove trailing separators from a root, preserving drive roots. */
+export function normalizeRootPath(path: string): string {
+  const trimmed = path.trim()
+  if (trimmed === '') return ''
+  const driveRoot = trimmed.match(/^([A-Za-z]:)([/\\])?$/)
+  if (driveRoot !== null) return `${driveRoot[1]}${driveRoot[2] ?? '/'}`
+  if (/^[/\\]+$/.test(trimmed)) return trimmed.startsWith('\\') ? '\\' : '/'
+  return trimmed.replace(/[/\\]+$/, '')
+}
+
 /** True for absolute local paths, including Windows drive-letter paths. */
 export function isAbsoluteLocalPath(path: string): boolean {
   const normalized = normalizeSeparators(path)

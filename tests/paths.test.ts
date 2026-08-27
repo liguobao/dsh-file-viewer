@@ -4,6 +4,7 @@ import {
   isAbsoluteLocalPath,
   isPathInside,
   isInsideAnyRoot,
+  normalizeRootPath,
   safeJoin,
   hasTraversal,
 } from '../src/core/paths.js'
@@ -53,6 +54,14 @@ describe('path validation', () => {
     expect(isPathInside('c:/workspace', 'C:\\Workspace\\a.txt')).toBe(true)
     expect(isPathInside('C:/workspace', 'D:\\workspace\\a.txt')).toBe(false)
     expect(isPathInside('/Workspace', '/workspace/a.txt')).toBe(false)
+  })
+
+  it('normalizes roots without stripping Windows drive roots', () => {
+    expect(normalizeRootPath('/workspace/')).toBe('/workspace')
+    expect(normalizeRootPath('C:/workspace/')).toBe('C:/workspace')
+    expect(normalizeRootPath('C:\\workspace\\')).toBe('C:\\workspace')
+    expect(normalizeRootPath('C:\\')).toBe('C:\\')
+    expect(normalizeRootPath('D:')).toBe('D:/')
   })
 
   it('detects absolute local paths across platforms', () => {

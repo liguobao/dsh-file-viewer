@@ -163,6 +163,14 @@ function resolveSegments(path) {
 function normalizeSeparators(path) {
   return path.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
 }
+function normalizeRootPath(path) {
+  const trimmed = path.trim();
+  if (trimmed === "") return "";
+  const driveRoot = trimmed.match(/^([A-Za-z]:)([/\\])?$/);
+  if (driveRoot !== null) return `${driveRoot[1]}${driveRoot[2] ?? "/"}`;
+  if (/^[/\\]+$/.test(trimmed)) return trimmed.startsWith("\\") ? "\\" : "/";
+  return trimmed.replace(/[/\\]+$/, "");
+}
 function comparisonPath(path) {
   const normalized = resolveSegments(path).join("/");
   return isWindowsLikePath(path) ? normalized.toLowerCase() : normalized;
@@ -408,8 +416,9 @@ var LocalFileContentProvider = class {
   }
   async openExternal(locator, signal) {
     const { path } = await this.resolveChecked(locator, signal);
-    if (this.options.apiProxy === void 0) throw new Error("External open is not available.");
-    await this.options.apiProxy.host.openPath({ rpcId: "file-viewer-open", payload: { path } }, signal);
+    const apiProxy = this.currentApiProxy();
+    if (apiProxy === void 0) throw new Error("External open is not available.");
+    await apiProxy.host.openPath({ rpcId: "file-viewer-open", payload: { path } }, signal);
   }
   async resolveChecked(locator, signal) {
     let target;
@@ -418,7 +427,7 @@ var LocalFileContentProvider = class {
     } catch (error) {
       throw new Error(`Cannot resolve locator: ${error instanceof Error ? error.message : String(error)}`);
     }
-    for (const root of this.options.roots) {
+    for (const root of await this.allowedRoots()) {
       let rootTarget;
       try {
         rootTarget = await this.options.fs.resolve(root, { signal });
@@ -431,6 +440,37 @@ var LocalFileContentProvider = class {
     }
     throw new Error("Access denied: the locator is outside the allowed workspaces.");
   }
+  async allowedRoots() {
+    const roots = new Set(this.options.roots.map(normalizeRootPath).filter((root) => root !== ""));
+    const apiProxy = this.currentApiProxy();
+    if (apiProxy !== void 0) {
+      try {
+        const response = await apiProxy.workspace.list({ rpcId: "file-viewer-roots", payload: {} });
+        if (response.result.ok && response.result.value !== void 0) {
+          for (const workspace of response.result.value.items) {
+            const root = normalizeRootPath(workspace.path);
+            if (root !== "") roots.add(root);
+          }
+        }
+      } catch {
+      }
+      try {
+        const response = await apiProxy.sessions?.list({ rpcId: "file-viewer-session-roots", payload: {} });
+        if (response?.result.ok && response.result.value !== void 0) {
+          for (const session of response.result.value.items) {
+            if (session.cwd === void 0) continue;
+            const root = normalizeRootPath(session.cwd);
+            if (root !== "") roots.add(root);
+          }
+        }
+      } catch {
+      }
+    }
+    return [...roots];
+  }
+  currentApiProxy() {
+    return typeof this.options.apiProxy === "function" ? this.options.apiProxy() : this.options.apiProxy;
+  }
 };
 
 // src/index.ts
@@ -440,7 +480,7 @@ var Config = s.object({
   extraRoots: s.array(s.string())
 });
 function resolveConfig(input = {}) {
-  const extraRoots = (input.extraRoots ?? []).map((root) => normalizeSeparators(root).replace(/\/+$/, "")).filter((root) => root !== "");
+  const extraRoots = (input.extraRoots ?? []).map(normalizeRootPath).filter((root) => root !== "");
   return { enabled: input.enabled ?? true, extraRoots };
 }
 function apply(ctx, input = {}) {
@@ -475,7 +515,6 @@ async function activate(ctx, input, providers, service) {
   }
   ctx.provide("fileViewerHost", service);
   const fs = ctx.get("fs");
-  const apiProxy = ctx.get("apiProxy");
   const connection = ctx.get("connection");
   if (connection?.rpc === void 0) {
     ctx.logger.warn("dsh-file-viewer: the connection RPC registry is unavailable; the viewer is disabled");
@@ -484,20 +523,10 @@ async function activate(ctx, input, providers, service) {
   let unregisterLocalFiles;
   if (fs !== void 0) {
     const roots = /* @__PURE__ */ new Set([process.cwd(), ...merged.extraRoots]);
-    if (apiProxy !== void 0) {
-      try {
-        const response = await apiProxy.workspace.list({ rpcId: "file-viewer-roots", payload: {} });
-        if (response.result.ok) {
-          for (const workspace of response.result.value.items) roots.add(normalizeSeparators(workspace.path));
-        }
-      } catch (error) {
-        ctx.logger.warn("dsh-file-viewer: workspace list unavailable", error);
-      }
-    }
     unregisterLocalFiles = providers.register(new LocalFileContentProvider({
       fs,
-      apiProxy,
-      roots: [...roots].filter(Boolean)
+      apiProxy: () => ctx.get("apiProxy"),
+      roots: [...roots].map(normalizeRootPath).filter(Boolean)
     }));
   } else {
     ctx.logger.info("dsh-file-viewer: ctx.fs is unavailable; waiting for registered content providers");
