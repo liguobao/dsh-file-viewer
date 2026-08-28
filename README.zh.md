@@ -32,11 +32,11 @@
 
 ## 兼容性
 
-`dsh-file-viewer` v0.3.x 面向 DSH v0.1.2-alpha.1 的破坏性包图：
-`conversation.view`、`ctx.workspaceRegistry`、`ctx.sessions` 和
-`ctx.sessionController`。旧的 DSH 0.1.0-rc.x profile 请继续使用 v0.2.8。
-Host provider 仍保留旧 `apiProxy` fallback，但发布包的 peer dependencies
-和 Client 注入元数据已经不再面向旧 UI/runtime 结构。
+`dsh-file-viewer` v0.3.1 起同时支持 DSH v0.1.1-rc.2 和采用破坏性新包图的
+v0.1.2-alpha.1。在 rc2 上，Host RPC 通道会显式声明仅允许 loopback，Workspace
+发现使用旧版 `apiProxy` fallback；在 v0.1.2 上则会额外使用
+`ctx.workspaceRegistry`、`ctx.sessions` 和 `ctx.sessionController`。Client 元数据
+只依赖两代包图共有的包，再由它们的传递依赖提供各版本对应的运行时服务。
 
 DSH v0.1.2 alpha 包在本插件中是由宿主提供的 peer dependencies。部分包名
 目前可能尚未发布到 npm，因此 pnpm lockfile 使用了关闭 peer 自动安装的设置

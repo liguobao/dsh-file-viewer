@@ -29,7 +29,9 @@ export interface HostContextLike {
 }
 export interface HostConnectionLike {
     rpc: {
-        handle(channel: string, handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>): () => Promise<void>;
+        handle(channel: string, handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>, options: {
+            authority: 'loopback' | 'trusted-host';
+        }): () => Promise<void>;
     };
 }
 /**

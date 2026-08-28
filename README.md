@@ -62,12 +62,13 @@ open and inspect files right inside the web UI — no external application neede
 
 ## Compatibility
 
-`dsh-file-viewer` v0.3.x targets the breaking DSH v0.1.2-alpha.1 package graph:
-`conversation.view`, `ctx.workspaceRegistry`, `ctx.sessions`, and
-`ctx.sessionController`. Use v0.2.8 for older DSH 0.1.0-rc.x profiles. The host
-provider still keeps a legacy `apiProxy` fallback, but the published peer
-dependencies and client injection metadata no longer target the old UI/runtime
-layout.
+`dsh-file-viewer` v0.3.1 and later support both DSH v0.1.1-rc.2 and the breaking
+v0.1.2-alpha.1 package graph. On rc2 the host RPC channel is registered with an
+explicit loopback authority and workspace discovery uses the legacy `apiProxy`
+fallback. On v0.1.2 the viewer additionally uses `ctx.workspaceRegistry`,
+`ctx.sessions`, and `ctx.sessionController`. The client metadata depends only
+on packages shared by both graphs; their transitive dependencies provide the
+generation-specific runtime services.
 
 The DSH v0.1.2 alpha packages are host-provided peer dependencies for this
 plugin. Some package names may not be published to npm yet, so the pnpm lockfile

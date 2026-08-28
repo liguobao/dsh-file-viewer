@@ -9,8 +9,9 @@ architecture (Step 1) and the resulting design (Step 2).
 ## 1. How DeepSeek Harness plugins work (studied from the actual code)
 
 All findings below come from reading the installed packages under
-`@deepseek-ai/dsh` (initially v0.1.0-rc.6) and the local
-`deepseek-harness` v0.1.2-alpha.1 checkout, NOT from assumptions.
+`@deepseek-ai/dsh` (initially v0.1.0-rc.6), the published v0.1.1-rc.2
+packages, and the local `deepseek-harness` v0.1.2-alpha.1 checkout, NOT from
+assumptions.
 
 ### 1.1 Plugin package shape
 
@@ -95,8 +96,11 @@ re-provide `chatFileMentions`, which ui-deliverables owns).
   child)` (boundary test), `stat`, `lstat`, `readBytes(target, signal,
   maxBytes)` (hard-capped read — never buffers unbounded files),
   `streamText`, `listDir`, `processPath(target)`.
-- **Host→client RPC extension**: `ctx.connection.rpc.handle(channel, handler)`
-  returns a disposer; handler returns
+- **Host→client RPC extension**: rc2 uses
+  `ctx.connection.rpc.handle(channel, handler, { authority })`; v0.1.2-alpha.1
+  uses `handle(channel, handler)`. File Viewer always supplies
+  `{ authority: 'loopback' }`: rc2 enforces it, while the alpha implementation
+  ignores the extra JavaScript argument. The call returns a disposer; handler returns
   `RpcResult` (`{ok:true,value}` | `{ok:false,error:{code,message,details}}`).
   Client side: `ctx.connection.rpc.call(channel, endpoint, payload)`.
 - **Client**: `ctx.workspaces.list` (workspace rows), `ctx.sessions.list`

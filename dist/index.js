@@ -578,7 +578,8 @@ async function activate(ctx, input, providers, service) {
   await ctx.effect(() => {
     const dispose = connection.rpc.handle(
       "/fileviewer",
-      (endpoint, payload, signal) => service.handle(endpoint, payload, signal)
+      (endpoint, payload, signal) => service.handle(endpoint, payload, signal),
+      { authority: "loopback" }
     );
     ctx.logger.debug("dsh-file-viewer: /fileviewer channel registered");
     return async () => {
