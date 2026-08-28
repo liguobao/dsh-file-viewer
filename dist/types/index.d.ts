@@ -1,7 +1,7 @@
 /**
  * dsh-file-viewer — node half (host side).
  *
- * Registers the `/fileviewer` loopback RPC channel and a `fileViewerContent`
+ * Registers the `/fileviewer` authenticated RPC channel and a `fileViewerContent`
  * provider registry. Content can come from any plugin; local workspace files
  * are only an optional backwards-compatible provider.
  */
@@ -29,16 +29,14 @@ export interface HostContextLike {
 }
 export interface HostConnectionLike {
     rpc: {
-        handle(channel: string, handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>, options: {
-            authority: 'loopback' | 'trusted-host';
-        }): () => Promise<void>;
+        handle(channel: string, handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>): () => Promise<void>;
     };
 }
 /**
  * Host-side service exposed to trusted plugins as `fileViewerHost`.
  *
  * The service intentionally keeps the same bounded RPC-shaped contract as
- * the loopback channel. A transport plugin can forward an allowlisted subset
+ * the browser RPC channel. A transport plugin can forward an allowlisted subset
  * without reaching around File Viewer's provider authorization boundary.
  */
 export interface FileViewerHostService {

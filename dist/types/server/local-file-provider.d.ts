@@ -61,9 +61,43 @@ export interface ApiProxyLike {
         }, signal?: AbortSignal): Promise<unknown>;
     };
 }
+export interface WorkspaceRegistryLike {
+    list(): Array<{
+        path?: string;
+    } | undefined>;
+}
+export interface HostSessionsLike {
+    list(): Array<{
+        cwd?: string;
+        header?: {
+            cwd?: string;
+        };
+    } | undefined>;
+}
+export interface SessionControllerLike {
+    openWorkspacePath(request: {
+        path: string;
+    }, signal?: AbortSignal): Promise<{
+        opened: true;
+    } | {
+        ok: true;
+        value: {
+            opened: true;
+        };
+    } | {
+        ok: false;
+        error: {
+            message?: string;
+        };
+    }>;
+}
 export interface LocalFileContentProviderOptions {
     fs: FsLike;
+    /** Legacy DSH <= 0.1.0 API proxy. Prefer the explicit services below. */
     apiProxy?: ApiProxyLike | (() => ApiProxyLike | undefined);
+    workspaceRegistry?: WorkspaceRegistryLike | (() => WorkspaceRegistryLike | undefined);
+    sessions?: HostSessionsLike | (() => HostSessionsLike | undefined);
+    sessionController?: SessionControllerLike | (() => SessionControllerLike | undefined);
     /** Absolute directory roots the provider may access. */
     roots: string[];
 }
@@ -81,4 +115,7 @@ export declare class LocalFileContentProvider implements FileViewerContentProvid
     private resolveChecked;
     private allowedRoots;
     private currentApiProxy;
+    private currentWorkspaceRegistry;
+    private currentSessions;
+    private currentSessionController;
 }

@@ -24,11 +24,29 @@
 
 ## 工作原理
 
-- **Host 端**（`dist/index.js`）注册 `/fileviewer` 回环 RPC 通道，并提供 `fileViewerContent` 内容提供器注册表，以及供受信任传输插件使用的受限 `fileViewerHost` 服务。内容不必来自本地目录：其他 Host 插件可以为 `artifact://run/report.json`、对象存储、生成产物或远程 API 等 locator 注册读取器。只有在 `ctx.fs` 可用时，插件才会安装带边界校验的本地文件提供器。
+- **Host 端**（`dist/index.js`）注册 `/fileviewer` 认证 RPC 通道，并提供 `fileViewerContent` 内容提供器注册表，以及供受信任传输插件使用的受限 `fileViewerHost` 服务。内容不必来自本地目录：其他 Host 插件可以为 `artifact://run/report.json`、对象存储、生成产物或远程 API 等 locator 注册读取器。只有在 `ctx.fs` 可用时，插件才会安装带边界校验的本地文件提供器；在 DSH v0.1.2 中，它会从 `ctx.workspaceRegistry` 发现 workspace roots，从 `ctx.sessions` 发现实时 session cwd，并通过 `ctx.sessionController` 执行原生外部打开。
 - **Client 端**（`dist/client.js`）提供 `fileViewer` 服务（`ctx.get('fileViewer')` → `openFile(path, { line, renderer })`），并将文件查看器作为与“对话”“轨迹”并列的 Harness Tab 展示。可以从对话中的产物文件标签，或 Workspace 行“…”菜单中的**浏览文件 / Browse files**入口打开。
-- **Workspace“…”菜单补丁**（`scripts/patch-workspace-menu.mjs`）：由于 Workspace 行菜单目前没有 Slot，此脚本会对已安装的 `@deepseek-ai/dsh-client-ui-workspace` 客户端包执行三处带守卫、可重复运行的修改，加入浏览文件入口及中英文文案。Harness 更新后可以安全地重新运行；若上游结构发生变化，脚本会明确报错并停止。
+- **Workspace“…”菜单补丁**（`scripts/patch-workspace-menu.mjs`）：由于 Workspace 行菜单目前没有 Slot，此脚本会对 `deepseek-harness` 新版源码 checkout（v0.1.2-alpha.1 优先路径）或已安装的 `@deepseek-ai/dsh-client-ui-workspace` 客户端包执行带守卫、可重复运行的修改，加入浏览文件入口及中英文文案。Harness 更新后可以安全地重新运行；若上游结构发生变化，脚本会明确报错并停止。
 - **大文件策略**：小于 5 MB 时整文件读取；5–50 MB 分块流式读取；大于 50 MB 默认只读取开头，并提供“加载更多 / 跳到末尾”。单次范围读取上限为 8 MiB，文本和 CSV 行采用窗口化渲染，因此不会把 500 MB 日志一次性载入浏览器内存。
 - **主题**：样式只使用 `--dsw-alias-*` 变量并遵循 Harness 面板比例，可自动适配明暗主题。
+
+## 兼容性
+
+`dsh-file-viewer` v0.3.x 面向 DSH v0.1.2-alpha.1 的破坏性包图：
+`conversation.view`、`ctx.workspaceRegistry`、`ctx.sessions` 和
+`ctx.sessionController`。旧的 DSH 0.1.0-rc.x profile 请继续使用 v0.2.8。
+Host provider 仍保留旧 `apiProxy` fallback，但发布包的 peer dependencies
+和 Client 注入元数据已经不再面向旧 UI/runtime 结构。
+
+DSH v0.1.2 alpha 包在本插件中是由宿主提供的 peer dependencies。部分包名
+目前可能尚未发布到 npm，因此 pnpm lockfile 使用了关闭 peer 自动安装的设置
+（`pnpm-workspace.yaml`）。如果这些包正式发布前需要重新生成 lockfile，请保留
+`autoInstallPeers: false`。
+
+Workspace 行的“浏览文件”入口仍是兼容补丁，因为上游
+`@deepseek-ai/dsh-client-ui-workspace` 还没有第三方菜单 Slot。每次更新 Harness
+后请重新运行 `scripts/patch-workspace-menu.mjs`；脚本可重复运行，遇到版本漂移会
+明确报错并停止。
 
 ## 公共 API
 
@@ -121,6 +139,9 @@ npm test               # vitest：mime、renderer、paths、large-file、csv、j
 # 在仓库根目录执行；Profile 会从当前目录解析相对路径
 dsh plugin --profile web add /path/to/dsh-file-viewer
 # 兼容补丁：在每个 Workspace 的“…”菜单中加入“浏览文件”
+# 针对 v0.1.2 源码 checkout：
+DSH_HARNESS_SOURCE=/path/to/deepseek-harness node scripts/patch-workspace-menu.mjs
+# 或针对已安装的 profile 包：
 node scripts/patch-workspace-menu.mjs
 # 然后重启 Web 服务。安全重启流程见 scripts/restart-dsh-web.sh。
 ```
@@ -129,7 +150,7 @@ node scripts/patch-workspace-menu.mjs
 
 ## 安全说明
 
-- 可选的本地文件提供器会在 Host 端对真实路径执行允许根目录校验（workspace 路径、已知 session cwd、Host cwd 和配置的额外 roots，经 `fs.contains` 校验）。自定义提供器必须在自己的 locator 命名空间内负责授权。
+- 可选的本地文件提供器会在 Host 端对真实路径执行允许根目录校验（DSH v0.1.2 workspace 路径、实时 session cwd、Host cwd 和配置的额外 roots，经 `fs.contains` 校验）。自定义提供器必须在自己的 locator 命名空间内负责授权。
 - Markdown 使用 `html: false` 渲染，并通过 DOMPurify 移除脚本、iframe、事件处理器和 `javascript:` URL。
 - SVG 不会作为 HTML 注入，只通过 `<img>` 显示。
 - 插件会通过 NUL 扫描和魔数识别二进制文件；“作为文本打开”始终需要用户明确操作。

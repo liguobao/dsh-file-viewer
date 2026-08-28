@@ -416,6 +416,14 @@ var LocalFileContentProvider = class {
   }
   async openExternal(locator, signal) {
     const { path } = await this.resolveChecked(locator, signal);
+    const sessionController = this.currentSessionController();
+    if (sessionController !== void 0) {
+      const result = await sessionController.openWorkspacePath({ path }, signal);
+      if (isRpcResult(result) && !result.ok) {
+        throw new Error(result.error.message ?? "External open failed.");
+      }
+      return;
+    }
     const apiProxy = this.currentApiProxy();
     if (apiProxy === void 0) throw new Error("External open is not available.");
     await apiProxy.host.openPath({ rpcId: "file-viewer-open", payload: { path } }, signal);
@@ -442,6 +450,27 @@ var LocalFileContentProvider = class {
   }
   async allowedRoots() {
     const roots = new Set(this.options.roots.map(normalizeRootPath).filter((root) => root !== ""));
+    const workspaceRegistry = this.currentWorkspaceRegistry();
+    if (workspaceRegistry !== void 0) {
+      try {
+        for (const workspace of workspaceRegistry.list()) {
+          const root = typeof workspace?.path === "string" ? normalizeRootPath(workspace.path) : "";
+          if (root !== "") roots.add(root);
+        }
+      } catch {
+      }
+    }
+    const sessions = this.currentSessions();
+    if (sessions !== void 0) {
+      try {
+        for (const session of sessions.list()) {
+          const cwd = session?.header?.cwd ?? session?.cwd;
+          const root = typeof cwd === "string" ? normalizeRootPath(cwd) : "";
+          if (root !== "") roots.add(root);
+        }
+      } catch {
+      }
+    }
     const apiProxy = this.currentApiProxy();
     if (apiProxy !== void 0) {
       try {
@@ -471,7 +500,19 @@ var LocalFileContentProvider = class {
   currentApiProxy() {
     return typeof this.options.apiProxy === "function" ? this.options.apiProxy() : this.options.apiProxy;
   }
+  currentWorkspaceRegistry() {
+    return typeof this.options.workspaceRegistry === "function" ? this.options.workspaceRegistry() : this.options.workspaceRegistry;
+  }
+  currentSessions() {
+    return typeof this.options.sessions === "function" ? this.options.sessions() : this.options.sessions;
+  }
+  currentSessionController() {
+    return typeof this.options.sessionController === "function" ? this.options.sessionController() : this.options.sessionController;
+  }
 };
+function isRpcResult(value) {
+  return typeof value === "object" && value !== null && typeof value.ok === "boolean";
+}
 
 // src/index.ts
 var name = "dsh-file-viewer";
@@ -526,6 +567,9 @@ async function activate(ctx, input, providers, service) {
     unregisterLocalFiles = providers.register(new LocalFileContentProvider({
       fs,
       apiProxy: () => ctx.get("apiProxy"),
+      workspaceRegistry: () => ctx.get("workspaceRegistry"),
+      sessions: () => ctx.get("sessions"),
+      sessionController: () => ctx.get("sessionController"),
       roots: [...roots].map(normalizeRootPath).filter(Boolean)
     }));
   } else {
@@ -534,8 +578,7 @@ async function activate(ctx, input, providers, service) {
   await ctx.effect(() => {
     const dispose = connection.rpc.handle(
       "/fileviewer",
-      (endpoint, payload, signal) => service.handle(endpoint, payload, signal),
-      { authority: "loopback" }
+      (endpoint, payload, signal) => service.handle(endpoint, payload, signal)
     );
     ctx.logger.debug("dsh-file-viewer: /fileviewer channel registered");
     return async () => {

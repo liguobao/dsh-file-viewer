@@ -36,9 +36,32 @@ export interface ApiProxyLike {
   }
 }
 
+export interface WorkspaceRegistryLike {
+  list(): Array<{ path?: string } | undefined>
+}
+
+export interface HostSessionsLike {
+  list(): Array<{ cwd?: string; header?: { cwd?: string } } | undefined>
+}
+
+export interface SessionControllerLike {
+  openWorkspacePath(
+    request: { path: string },
+    signal?: AbortSignal,
+  ): Promise<
+    | { opened: true }
+    | { ok: true; value: { opened: true } }
+    | { ok: false; error: { message?: string } }
+  >
+}
+
 export interface LocalFileContentProviderOptions {
   fs: FsLike
+  /** Legacy DSH <= 0.1.0 API proxy. Prefer the explicit services below. */
   apiProxy?: ApiProxyLike | (() => ApiProxyLike | undefined)
+  workspaceRegistry?: WorkspaceRegistryLike | (() => WorkspaceRegistryLike | undefined)
+  sessions?: HostSessionsLike | (() => HostSessionsLike | undefined)
+  sessionController?: SessionControllerLike | (() => SessionControllerLike | undefined)
   /** Absolute directory roots the provider may access. */
   roots: string[]
 }
@@ -112,6 +135,14 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
 
   async openExternal(locator: string, signal: AbortSignal): Promise<void> {
     const { path } = await this.resolveChecked(locator, signal)
+    const sessionController = this.currentSessionController()
+    if (sessionController !== undefined) {
+      const result = await sessionController.openWorkspacePath({ path }, signal)
+      if (isRpcResult(result) && !result.ok) {
+        throw new Error(result.error.message ?? 'External open failed.')
+      }
+      return
+    }
     const apiProxy = this.currentApiProxy()
     if (apiProxy === undefined) throw new Error('External open is not available.')
     await apiProxy.host.openPath({ rpcId: 'file-viewer-open', payload: { path } }, signal)
@@ -140,6 +171,29 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
 
   private async allowedRoots(): Promise<string[]> {
     const roots = new Set(this.options.roots.map(normalizeRootPath).filter((root) => root !== ''))
+    const workspaceRegistry = this.currentWorkspaceRegistry()
+    if (workspaceRegistry !== undefined) {
+      try {
+        for (const workspace of workspaceRegistry.list()) {
+          const root = typeof workspace?.path === 'string' ? normalizeRootPath(workspace.path) : ''
+          if (root !== '') roots.add(root)
+        }
+      } catch {
+        // Fall through to other root sources when the workspace registry is still booting.
+      }
+    }
+    const sessions = this.currentSessions()
+    if (sessions !== undefined) {
+      try {
+        for (const session of sessions.list()) {
+          const cwd = session?.header?.cwd ?? session?.cwd
+          const root = typeof cwd === 'string' ? normalizeRootPath(cwd) : ''
+          if (root !== '') roots.add(root)
+        }
+      } catch {
+        // Live session roots are opportunistic; static roots still apply.
+      }
+    }
     const apiProxy = this.currentApiProxy()
     if (apiProxy !== undefined) {
       try {
@@ -172,4 +226,20 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
   private currentApiProxy(): ApiProxyLike | undefined {
     return typeof this.options.apiProxy === 'function' ? this.options.apiProxy() : this.options.apiProxy
   }
+
+  private currentWorkspaceRegistry(): WorkspaceRegistryLike | undefined {
+    return typeof this.options.workspaceRegistry === 'function' ? this.options.workspaceRegistry() : this.options.workspaceRegistry
+  }
+
+  private currentSessions(): HostSessionsLike | undefined {
+    return typeof this.options.sessions === 'function' ? this.options.sessions() : this.options.sessions
+  }
+
+  private currentSessionController(): SessionControllerLike | undefined {
+    return typeof this.options.sessionController === 'function' ? this.options.sessionController() : this.options.sessionController
+  }
+}
+
+function isRpcResult(value: unknown): value is { ok: boolean; error: { message?: string } } {
+  return typeof value === 'object' && value !== null && typeof (value as { ok?: unknown }).ok === 'boolean'
 }

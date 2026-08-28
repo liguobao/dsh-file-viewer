@@ -9,9 +9,8 @@ architecture (Step 1) and the resulting design (Step 2).
 ## 1. How DeepSeek Harness plugins work (studied from the actual code)
 
 All findings below come from reading the installed packages under
-`@deepseek-ai/dsh` (v0.1.0-rc.6) and the local dev checkout
-`deepseek-harness-remote` (a working third-party plugin), NOT from
-assumptions.
+`@deepseek-ai/dsh` (initially v0.1.0-rc.6) and the local
+`deepseek-harness` v0.1.2-alpha.1 checkout, NOT from assumptions.
 
 ### 1.1 Plugin package shape
 
@@ -24,11 +23,13 @@ A DSH plugin is an npm package with two halves (model: `dsh-remote`):
   bundle whose entry calls `window.__ModuleLoader__.load({ id, factory })`.
   `factory(require)` returns `{ apply, inject }`; `apply(ctx)` registers
   UI into slots. `require` is the module-table require — `react` and any
-  `@deepseek-ai/*` package listed in `dsh.client.inject` are resolvable.
+  `@deepseek-ai/*` package listed in `dsh.client.external` are resolvable.
 - **package.json** declares:
   - `"dsh": { "client": { "inject": [...], "platform": "web" }, "bundle": { "patch": "./cordis.patch.yml" } }`
-  - `dsh.client.inject` = packages whose client modules the bundle `require`s
-    at runtime (they become seeds in the browser module table).
+  - `dsh.client.inject` = package-level client graph edges used for factory
+    arrival and Cordis composition. The v0.1.2 loader treats these as package
+    dependencies; non-baseline runtime `require()` specifiers belong in
+    `dsh.client.external`.
   - `dsh.bundle.patch` = a YAML patch layer applied when the package joins a
     profile's bundle stack.
 
@@ -55,12 +56,12 @@ A DSH plugin is an npm package with two halves (model: `dsh-remote`):
 - **Client-only changes hot-reload** (`dsh-client-hmr` is active in this
   profile). Node-half changes require a web restart.
 
-### 1.3 UI integration — the slot system (`@deepseek-ai/dsh-client-ui-slots`)
+### 1.3 UI integration — the slot registry
 
-UI is composed through a typed slot registry. Packages declare slots by
-merging into `SlotMap`; plugin entries register components into declared
-slots. The composed props of an entry are the intersection of several shares;
-plugins practically need:
+UI is composed through a typed slot registry. The runtime `ctx.slots` seat is
+provided by `@deepseek-ai/dsh-client-ui-renderer` in v0.1.2; slot contracts are
+still declared by packages merging into `SlotMap`. The composed props of an
+entry are the intersection of several shares; plugins practically need:
 
 ```ts
 ctx.slots.inject('slot.name', () => ctx.slots.register({
@@ -77,7 +78,7 @@ Relevant slots for a file viewer (verified in the installed types):
 
 | Slot | Kind | Scope | Use for us |
 |---|---|---|---|
-| `shell.overlay` | list | root | the right-docked viewer column (click-through layer; the panel is additive) |
+| `conversation.view` | list | session | file viewer tab beside Chat and Trajectory |
 | `conversation.chat.turnTail` | chain | session | produced-file chips → open in viewer (occupied by ui-deliverables at priority 0; chain = ascending priority, first non-null `select` wins, so priority -1 replaces it intentionally) |
 | workspace "…" menu | — | — | NOT a slot: ui-workspace's row menu is hardcoded → minimal patch script adds a "浏览文件" item (see §2.3) |
 | `settings.plugin.item` | keyed | root | settings card (P2) |
@@ -94,17 +95,19 @@ re-provide `chatFileMentions`, which ui-deliverables owns).
   child)` (boundary test), `stat`, `lstat`, `readBytes(target, signal,
   maxBytes)` (hard-capped read — never buffers unbounded files),
   `streamText`, `listDir`, `processPath(target)`.
-- **Host→client RPC extension**: `ctx.connection.rpc.handle(channel, handler,
-  { authority: 'loopback' })` returns a disposer; handler returns
+- **Host→client RPC extension**: `ctx.connection.rpc.handle(channel, handler)`
+  returns a disposer; handler returns
   `RpcResult` (`{ok:true,value}` | `{ok:false,error:{code,message,details}}`).
   Client side: `ctx.connection.rpc.call(channel, endpoint, payload)`.
-- **Client**: `ctx.workspaces.listDirectory(path)` (directory listing),
-  `ctx.workspaces.openPath(path)` (OS open), `ctx.sessions.list` (session
-  cwd), `resolveWorkspacePath(cwd, path)` from `dsh-client-runtime/client`.
-- **Allowed roots** (host): every workspace path
-  (`ctx.apiProxy.workspace.list()`), known session cwd paths
-  (`ctx.apiProxy.sessions.list()`), the host process cwd, and configured extra
-  roots. `ctx.fs.resolve` + `contains` enforce the boundary (symlink-safe:
+- **Client**: `ctx.workspaces.list` (workspace rows), `ctx.sessions.list`
+  (current and live session cwd), and browser RPC calls to `/fileviewer`.
+  `resolveWorkspacePath(cwd, path)` moved to
+  `@deepseek-ai/dsh-util-workspace-path`; this plugin keeps an equivalent
+  local helper to avoid a client-bundle runtime dependency.
+- **Allowed roots** (host): every workspace path from
+  `ctx.workspaceRegistry.list()`, live session cwd paths from
+  `ctx.sessions.list()`, the host process cwd, and configured extra roots.
+  The legacy `ctx.apiProxy` path is still accepted when present. `ctx.fs.resolve` + `contains` enforce the boundary (symlink-safe:
   resolve follows symlinks, so an inside symlink pointing outside fails the
   containment check).
 
@@ -152,11 +155,11 @@ dsh-file-viewer/
 │   │   ├── json.ts         # safe parse + tree path builder
 │   │   └── format.ts       # bytes/time/basename formatting
 │   └── server/
-│       └── file-service.ts # host RPC implementation over ctx.fs + roots
+│       └── local-file-provider.ts # local ctx.fs provider + roots
 └── tests/                  # vitest suites (see §7)
 ```
 
-### 2.2 Host half — `/fileviewer` RPC (loopback)
+### 2.2 Host half — `/fileviewer` RPC
 
 The same bounded service is provided to trusted plugins as `fileViewerHost`.
 Transport plugins such as `dsh-remote` may forward a strict endpoint subset;
@@ -168,7 +171,7 @@ provider authorization and root checks stay inside File Viewer.
 | `readRange` | `{ path, offset, length }` | `{ data(base64), offset, size, eof }` |
 | `readHead` | `{ path, maxBytes }` | `{ data(base64), size, truncated }` |
 | `list` | `{ path }` | `{ path, entries: [{name, path, isDirectory, size, mtimeMs}] }` |
-| `openExternal` | `{ path }` | `{ opened: true }` (via `apiProxy.host.openPath`) |
+| `openExternal` | `{ path }` | `{ opened: true }` (via `ctx.sessionController.openWorkspacePath`, with legacy `apiProxy.host.openPath` fallback) |
 
 Every endpoint: `resolve` via `ctx.fs`, boundary-check against allowed roots,
 reject otherwise (`bad-request` / `internal` codes, message-carrying).
@@ -180,20 +183,19 @@ reject otherwise (`bad-request` / `internal` codes, message-carrying).
 - **Services injected**: `['connection', 'slots', 'locale', 'sessions', 'workspaces']`.
 - **`ctx.provide('fileViewer', api)`** — `api.openFile(path, { line?, renderer? })`
   (+ `stat`, `readRange`, `readHead`, `list`) — the public plugin API.
-- **`shell.overlay` entry** (`id: 'dsh-file-viewer'`): a **right-docked
-  viewer column** mirroring the Harness details panel (border-left on
-  `--dsw-alias-border-l1`, Harness toolbar/statusbar proportions) — toolbar
-  (name / type / size / Refresh / Open externally / Copy path / Close), body
-  (active renderer inside an error boundary; browse mode lists through the
-  boundary-checked `/fileviewer` RPC, starting at the workspace root), status
-  bar (encoding, size, mtime, line info). Closed with Esc or the close button;
-  the layer stays click-through so the app underneath remains usable.
+- **`conversation.view` entry** (`id: 'dsh-file-viewer'`): a viewer tab beside
+  Chat and Trajectory. It carries its own toolbar (name / type / size / Refresh
+  / Open externally / Copy path / Close), body (active renderer inside an error
+  boundary; browse mode lists through the boundary-checked `/fileviewer` RPC,
+  starting at the workspace root), and status bar (encoding, size, mtime, line
+  info). Esc returns to the Chat tab and resets the viewer state.
 - **Workspace "…" menu entry**: ui-workspace's row menu
   (`ProjectRowItem` → `workspaceMenuItems`) has no slot hook, so
   `scripts/patch-workspace-menu.mjs` applies three guarded, idempotent edits
-  to the installed bundle: a `browseFiles` menu item, an `onSelect` branch
-  calling `window.__dsfvBrowseWorkspace(workspaceId)` (installed by this
-  plugin's client), and zh/en dictionary keys. Version drift aborts loudly.
+  either to the v0.1.2 source checkout (`Rows.tsx` + `locales.ts`) or to the
+  installed bundle: a `browseFiles` menu item, an `onSelect` branch calling
+  `window.__dsfvBrowseWorkspace(workspaceId)` (installed by this plugin's
+  client), and zh/en dictionary keys. Version drift aborts loudly.
 - **`conversation.chat.turnTail` chain entry** (priority -1): produced-file
   chips (from the turn's `deliverables` location data) whose click opens the
   docked DSH File Viewer instead of the OS. Replaces ui-deliverables' chips

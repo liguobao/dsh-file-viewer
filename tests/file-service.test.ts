@@ -180,6 +180,51 @@ describe('file-viewer service', () => {
     expect((allowed as { ok: true; value: { name: string } }).value.name).toBe('notes.txt')
   })
 
+  it('accepts roots discovered from the v0.1.2 workspace registry at request time', async () => {
+    const file = join(root, 'notes.txt')
+    let registryAvailable = false
+    const providers = new FileViewerContentRegistry()
+    providers.register(new LocalFileContentProvider({
+      fs: fakeFs(root),
+      workspaceRegistry: () => registryAvailable
+        ? {
+            list() {
+              return [{ path: root }]
+            },
+          }
+        : undefined,
+      roots: [],
+    }))
+    const dynamicService = new FileViewerService({ providers })
+
+    const denied = await dynamicService.handle('stat', { path: file }, new AbortController().signal)
+    expect(denied.ok).toBe(false)
+
+    registryAvailable = true
+    const allowed = await dynamicService.handle('stat', { path: file }, new AbortController().signal)
+    expect(allowed.ok).toBe(true)
+    expect((allowed as { ok: true; value: { name: string } }).value.name).toBe('notes.txt')
+  })
+
+  it('accepts live session header cwd roots from the v0.1.2 session store', async () => {
+    const file = join(root, 'notes.txt')
+    const providers = new FileViewerContentRegistry()
+    providers.register(new LocalFileContentProvider({
+      fs: fakeFs(root),
+      sessions: {
+        list() {
+          return [{ header: { cwd: root } }]
+        },
+      },
+      roots: [],
+    }))
+    const sessionCwdService = new FileViewerService({ providers })
+    const result = await sessionCwdService.handle('stat', { path: file }, new AbortController().signal)
+
+    expect(result.ok).toBe(true)
+    expect((result as { ok: true; value: { name: string } }).value.name).toBe('notes.txt')
+  })
+
   it('accepts Windows roots discovered from apiProxy at request time', async () => {
     const file = join(root, 'notes.txt')
     const windowsRoot = 'c:\\workspace\\project\\'
@@ -273,6 +318,46 @@ describe('file-viewer service', () => {
     const result = await call('openExternal', { path: join(root, 'notes.txt') })
     expect(result.ok).toBe(false)
     expect((result.error as { message?: string }).message).toMatch(/not available/)
+  })
+
+  it('opens externally through the v0.1.2 session controller when available', async () => {
+    const file = join(root, 'notes.txt')
+    const opened: string[] = []
+    const providers = new FileViewerContentRegistry()
+    providers.register(new LocalFileContentProvider({
+      fs: fakeFs(root),
+      roots: [root],
+      sessionController: {
+        async openWorkspacePath(request) {
+          opened.push(request.path)
+          return { opened: true }
+        },
+      },
+    }))
+    const externalService = new FileViewerService({ providers })
+    const result = await externalService.handle('openExternal', { path: file }, new AbortController().signal)
+
+    expect(result.ok).toBe(true)
+    expect(opened).toEqual([file])
+  })
+
+  it('preserves v0.1.2 session controller external-open failures', async () => {
+    const file = join(root, 'notes.txt')
+    const providers = new FileViewerContentRegistry()
+    providers.register(new LocalFileContentProvider({
+      fs: fakeFs(root),
+      roots: [root],
+      sessionController: {
+        async openWorkspacePath() {
+          return { ok: false, error: { message: 'desktop unavailable' } }
+        },
+      },
+    }))
+    const externalService = new FileViewerService({ providers })
+    const result = await externalService.handle('openExternal', { path: file }, new AbortController().signal)
+
+    expect(result.ok).toBe(false)
+    expect((result as { ok: false; error: { message?: string } }).error.message).toMatch(/desktop unavailable/)
   })
 
   it('returns bad-request for unknown endpoints', async () => {

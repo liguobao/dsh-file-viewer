@@ -27,36 +27,58 @@ open and inspect files right inside the web UI — no external application neede
 
 ## How it works
 
-- **Host half** (`dist/index.js`) registers the `/fileviewer` loopback RPC
+- **Host half** (`dist/index.js`) registers the `/fileviewer` authenticated RPC
   channel and exposes both a `fileViewerContent` provider registry and a
   `fileViewerHost` bounded service for trusted transport plugins. The viewer does
   not assume content lives in a local folder: other host plugins can register
   readers for locators such as `artifact://run/report.json`, object storage,
   generated output, or remote APIs. A boundary-checked `ctx.fs` provider is
-  installed only when that service is available, preserving local-file
-  compatibility without making it a hard dependency.
+  installed only when that service is available; on DSH v0.1.2 it discovers
+  workspace roots from `ctx.workspaceRegistry`, live session cwd values from
+  `ctx.sessions`, and native open support from `ctx.sessionController`.
 - **Client half** (`dist/client.js`) provides the `fileViewer` service
   (`ctx.get('fileViewer')` → `openFile(path, { line, renderer })`) and renders
-  a **right-docked viewer column** (styled like the Harness details panel)
-  through the `shell.overlay` slot. It opens from:
+  the viewer as a `conversation.view` tab beside Chat and Trajectory. It opens
+  from:
   - produced-file chips in the conversation (`conversation.chat.turnTail`,
     priority -1 — clicking an agent-generated file previews it in-app), or
   - the **"浏览文件 / Browse files"** entry added to each workspace row's
     "…" menu (see the compatibility patch below).
 - **Workspace "…" menu patch** (`scripts/patch-workspace-menu.mjs`): the
   workspace browser renders its row menu from a hardcoded list with no slot
-  hook, so this script applies three guarded, idempotent edits to the
-  installed `@deepseek-ai/dsh-client-ui-workspace` client bundle: a
+  hook, so this script applies guarded, idempotent edits either to a
+  `deepseek-harness` source checkout (preferred for v0.1.2-alpha.1) or to an
+  installed `@deepseek-ai/dsh-client-ui-workspace` client bundle. It adds a
   `browseFiles` menu item (zh/en labels), an `onSelect` branch calling
-  `window.__dsfvBrowseWorkspace(workspaceId)`, and the two dictionary keys.
-  It aborts loudly on version drift and can be re-run safely after Harness
-  updates (`node scripts/patch-workspace-menu.mjs`).
+  `window.__dsfvBrowseWorkspace(workspaceId)`, and the dictionary keys. It
+  aborts loudly on version drift and can be re-run safely after Harness
+  updates (`DSH_HARNESS_SOURCE=/path/to/deepseek-harness node scripts/patch-workspace-menu.mjs`).
 - **Large-file strategy**: `< 5 MB` whole-file, `5–50 MB` chunked streaming,
   `> 50 MB` head-only with explicit "Load more / Go to end" navigation. Range
   reads are capped (8 MiB per call) and text/CSV rows are windowed, so a
   500 MB log never lands in browser memory.
 - **Theming**: styles use `--dsw-alias-*` tokens and match Harness's details
   panel proportions, so light/dark follow the Harness theme automatically.
+
+## Compatibility
+
+`dsh-file-viewer` v0.3.x targets the breaking DSH v0.1.2-alpha.1 package graph:
+`conversation.view`, `ctx.workspaceRegistry`, `ctx.sessions`, and
+`ctx.sessionController`. Use v0.2.8 for older DSH 0.1.0-rc.x profiles. The host
+provider still keeps a legacy `apiProxy` fallback, but the published peer
+dependencies and client injection metadata no longer target the old UI/runtime
+layout.
+
+The DSH v0.1.2 alpha packages are host-provided peer dependencies for this
+plugin. Some package names may not be published to npm yet, so the pnpm lockfile
+is generated with peer auto-install disabled (`pnpm-workspace.yaml`). If the
+lockfile needs to be regenerated before those packages are public, keep
+`autoInstallPeers: false`.
+
+The Workspace row Browse entry remains a compatibility patch because upstream
+`@deepseek-ai/dsh-client-ui-workspace` has no third-party menu slot. Re-run
+`scripts/patch-workspace-menu.mjs` after updating Harness; the script is
+idempotent and aborts on version drift.
 
 ## Public API
 
@@ -158,6 +180,9 @@ npm test               # vitest: mime, renderer, paths, large-file, csv, json, f
 # from the repo root (the profile resolves relative specs from your cwd)
 dsh plugin --profile web add /path/to/dsh-file-viewer
 # compatibility patch: add "浏览文件" to each workspace's "…" menu
+# with a v0.1.2 source checkout:
+DSH_HARNESS_SOURCE=/path/to/deepseek-harness node scripts/patch-workspace-menu.mjs
+# or against the installed profile package:
 node scripts/patch-workspace-menu.mjs
 # then restart the web service (preflight on 43124 → 43123), see
 # scripts/restart-dsh-web.sh for the safe pattern used in this repo.
@@ -170,8 +195,8 @@ update that reinstalls `@deepseek-ai/dsh-client-ui-workspace`.
 ## Security notes
 
 - Path validation is enforced host-side on realpath'd targets against allowed
-  roots (workspace paths, known session cwd paths, the host cwd, and configured
-  extra roots via `fs.contains`) by the optional local-files provider. Custom providers
+  roots (DSH v0.1.2 workspace paths, live session cwd paths, the host cwd, and
+  configured extra roots via `fs.contains`) by the optional local-files provider. Custom providers
   are responsible for authorization within their own locator namespace.
 - Markdown is rendered with `html: false` and sanitized with DOMPurify
   (scripts, iframes, event handlers and `javascript:` URLs removed).

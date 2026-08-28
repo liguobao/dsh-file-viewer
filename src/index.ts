@@ -1,7 +1,7 @@
 /**
  * dsh-file-viewer — node half (host side).
  *
- * Registers the `/fileviewer` loopback RPC channel and a `fileViewerContent`
+ * Registers the `/fileviewer` authenticated RPC channel and a `fileViewerContent`
  * provider registry. Content can come from any plugin; local workspace files
  * are only an optional backwards-compatible provider.
  */
@@ -9,7 +9,14 @@
 import s from '@deepseek-ai/schemastery'
 import { FileViewerService } from './server/file-service.js'
 import { FileViewerContentRegistry } from './server/content-provider.js'
-import { LocalFileContentProvider, type FsLike, type ApiProxyLike } from './server/local-file-provider.js'
+import {
+  LocalFileContentProvider,
+  type FsLike,
+  type ApiProxyLike,
+  type HostSessionsLike,
+  type SessionControllerLike,
+  type WorkspaceRegistryLike,
+} from './server/local-file-provider.js'
 import { normalizeRootPath } from './core/paths.js'
 
 export const name = 'dsh-file-viewer'
@@ -47,7 +54,6 @@ export interface HostConnectionLike {
     handle(
       channel: string,
       handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>,
-      options: { authority: 'loopback' | 'trusted-host' },
     ): () => Promise<void>
   }
 }
@@ -56,7 +62,7 @@ export interface HostConnectionLike {
  * Host-side service exposed to trusted plugins as `fileViewerHost`.
  *
  * The service intentionally keeps the same bounded RPC-shaped contract as
- * the loopback channel. A transport plugin can forward an allowlisted subset
+ * the browser RPC channel. A transport plugin can forward an allowlisted subset
  * without reaching around File Viewer's provider authorization boundary.
  */
 export interface FileViewerHostService {
@@ -118,6 +124,9 @@ async function activate(
     unregisterLocalFiles = providers.register(new LocalFileContentProvider({
       fs,
       apiProxy: () => ctx.get<ApiProxyLike>('apiProxy'),
+      workspaceRegistry: () => ctx.get<WorkspaceRegistryLike>('workspaceRegistry'),
+      sessions: () => ctx.get<HostSessionsLike>('sessions'),
+      sessionController: () => ctx.get<SessionControllerLike>('sessionController'),
       roots: [...roots].map(normalizeRootPath).filter(Boolean),
     }))
   } else {
@@ -128,7 +137,6 @@ async function activate(
     const dispose = connection.rpc.handle(
       '/fileviewer',
       (endpoint, payload, signal) => service.handle(endpoint, payload, signal),
-      { authority: 'loopback' },
     )
     ctx.logger.debug('dsh-file-viewer: /fileviewer channel registered')
     return async () => {
