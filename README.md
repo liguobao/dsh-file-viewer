@@ -47,7 +47,7 @@ open and inspect files right inside the web UI — no external application neede
 - **Workspace "…" menu patch** (`scripts/patch-workspace-menu.mjs`): the
   workspace browser renders its row menu from a hardcoded list with no slot
   hook, so this script applies guarded, idempotent edits either to a
-  `deepseek-harness` source checkout (preferred for v0.1.2-alpha.1) or to an
+  `deepseek-harness` source checkout (verified against dsh-v0.1.2-rc.1) or to an
   installed `@deepseek-ai/dsh-client-ui-workspace` client bundle. It adds a
   `browseFiles` menu item (zh/en labels), an `onSelect` branch calling
   `window.__dsfvBrowseWorkspace(workspaceId)`, and the dictionary keys. It
@@ -62,19 +62,20 @@ open and inspect files right inside the web UI — no external application neede
 
 ## Compatibility
 
-`dsh-file-viewer` v0.3.1 and later support both DSH v0.1.1-rc.2 and the breaking
-v0.1.2-alpha.1 package graph. On rc2 the host RPC channel is registered with an
-explicit loopback authority and workspace discovery uses the legacy `apiProxy`
-fallback. On v0.1.2 the viewer additionally uses `ctx.workspaceRegistry`,
+`dsh-file-viewer` v0.3.2 and later support both DSH v0.1.1-rc.2 and the breaking
+v0.1.2 package graph, including `dsh-v0.1.2-rc.1`. On rc2 the host RPC channel
+is registered with an explicit loopback authority and workspace discovery uses
+the legacy `apiProxy` fallback. On v0.1.2 the viewer additionally uses `ctx.workspaceRegistry`,
 `ctx.sessions`, and `ctx.sessionController`. The client metadata depends only
 on packages shared by both graphs; their transitive dependencies provide the
-generation-specific runtime services.
+generation-specific runtime services. On v0.1.2-rc.1 the viewer also accepts
+the `conversation.view` focus request and treats its opaque focus value as a
+file locator.
 
-The DSH v0.1.2 alpha packages are host-provided peer dependencies for this
-plugin. Some package names may not be published to npm yet, so the pnpm lockfile
-is generated with peer auto-install disabled (`pnpm-workspace.yaml`). If the
-lockfile needs to be regenerated before those packages are public, keep
-`autoInstallPeers: false`.
+DSH and React packages are host-provided optional peer dependencies for this
+plugin. This is required by v0.1.2-rc.1 profiles, which keep peer auto-install
+disabled (`autoInstallPeers: false`): installing the plugin must not add or
+require a second copy of the in-box platform packages.
 
 The Workspace row Browse entry remains a compatibility patch because upstream
 `@deepseek-ai/dsh-client-ui-workspace` has no third-party menu slot. Re-run

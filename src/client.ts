@@ -756,9 +756,34 @@ window.__ModuleLoader__.load({
     // -----------------------------------------------------------------------
     // Viewer panel
     // -----------------------------------------------------------------------
-    function FileViewerPanel(props: { api: FileViewerApi; t: Translate; sessionId?: string; useSessions?: (selector: (snapshot: SessionListSnapshot) => string | undefined) => string | undefined; onInspectDone?: () => void }): React.ReactNode {
+    interface ConversationViewRequest {
+      readonly view: string
+      readonly focus: string
+    }
+
+    interface FileViewerPanelProps {
+      api: FileViewerApi
+      t: Translate
+      sessionId?: string
+      useSessions?: (selector: (snapshot: SessionListSnapshot) => string | undefined) => string | undefined
+      viewRequest?: ConversationViewRequest | null
+      completeViewRequest?: () => void
+    }
+
+    function FileViewerPanel(props: FileViewerPanelProps): React.ReactNode {
       const { api, t } = props
       const state = useViewerState()
+
+      // DSH 0.1.2-rc.1 lets another conversation view select this tab and
+      // address an opaque focus value to it. File Viewer interprets that value
+      // as a locator, then acknowledges the one-shot request. Both owner props
+      // remain optional so the same bundle still runs on 0.1.1-rc.2.
+      React.useEffect(() => {
+        const request = props.viewRequest
+        if (request?.view !== 'dsh-file-viewer') return
+        api.openFile(request.focus)
+        props.completeViewRequest?.()
+      }, [api, props.viewRequest, props.completeViewRequest])
 
       React.useEffect(() => {
         const onKeyDown = (event: KeyboardEvent): void => {

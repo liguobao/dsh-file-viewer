@@ -26,22 +26,23 @@
 
 - **Host 端**（`dist/index.js`）注册 `/fileviewer` 认证 RPC 通道，并提供 `fileViewerContent` 内容提供器注册表，以及供受信任传输插件使用的受限 `fileViewerHost` 服务。内容不必来自本地目录：其他 Host 插件可以为 `artifact://run/report.json`、对象存储、生成产物或远程 API 等 locator 注册读取器。只有在 `ctx.fs` 可用时，插件才会安装带边界校验的本地文件提供器；在 DSH v0.1.2 中，它会从 `ctx.workspaceRegistry` 发现 workspace roots，从 `ctx.sessions` 发现实时 session cwd，并通过 `ctx.sessionController` 执行原生外部打开。
 - **Client 端**（`dist/client.js`）提供 `fileViewer` 服务（`ctx.get('fileViewer')` → `openFile(path, { line, renderer })`），并将文件查看器作为与“对话”“轨迹”并列的 Harness Tab 展示。可以从对话中的产物文件标签，或 Workspace 行“…”菜单中的**浏览文件 / Browse files**入口打开。
-- **Workspace“…”菜单补丁**（`scripts/patch-workspace-menu.mjs`）：由于 Workspace 行菜单目前没有 Slot，此脚本会对 `deepseek-harness` 新版源码 checkout（v0.1.2-alpha.1 优先路径）或已安装的 `@deepseek-ai/dsh-client-ui-workspace` 客户端包执行带守卫、可重复运行的修改，加入浏览文件入口及中英文文案。Harness 更新后可以安全地重新运行；若上游结构发生变化，脚本会明确报错并停止。
+- **Workspace“…”菜单补丁**（`scripts/patch-workspace-menu.mjs`）：由于 Workspace 行菜单目前没有 Slot，此脚本会对 `deepseek-harness` 新版源码 checkout（已针对 dsh-v0.1.2-rc.1 验证）或已安装的 `@deepseek-ai/dsh-client-ui-workspace` 客户端包执行带守卫、可重复运行的修改，加入浏览文件入口及中英文文案。Harness 更新后可以安全地重新运行；若上游结构发生变化，脚本会明确报错并停止。
 - **大文件策略**：小于 5 MB 时整文件读取；5–50 MB 分块流式读取；大于 50 MB 默认只读取开头，并提供“加载更多 / 跳到末尾”。单次范围读取上限为 8 MiB，文本和 CSV 行采用窗口化渲染，因此不会把 500 MB 日志一次性载入浏览器内存。
 - **主题**：样式只使用 `--dsw-alias-*` 变量并遵循 Harness 面板比例，可自动适配明暗主题。
 
 ## 兼容性
 
-`dsh-file-viewer` v0.3.1 起同时支持 DSH v0.1.1-rc.2 和采用破坏性新包图的
-v0.1.2-alpha.1。在 rc2 上，Host RPC 通道会显式声明仅允许 loopback，Workspace
-发现使用旧版 `apiProxy` fallback；在 v0.1.2 上则会额外使用
+`dsh-file-viewer` v0.3.2 起同时支持 DSH v0.1.1-rc.2 和采用破坏性新包图的
+v0.1.2，包括 `dsh-v0.1.2-rc.1`。在 rc2 上，Host RPC 通道会显式声明仅允许
+loopback，Workspace 发现使用旧版 `apiProxy` fallback；在 v0.1.2 上则会额外使用
 `ctx.workspaceRegistry`、`ctx.sessions` 和 `ctx.sessionController`。Client 元数据
 只依赖两代包图共有的包，再由它们的传递依赖提供各版本对应的运行时服务。
+在 v0.1.2-rc.1 上，查看器还会接收 `conversation.view` focus request，并将其中
+不透明的 focus 值作为文件 locator 打开。
 
-DSH v0.1.2 alpha 包在本插件中是由宿主提供的 peer dependencies。部分包名
-目前可能尚未发布到 npm，因此 pnpm lockfile 使用了关闭 peer 自动安装的设置
-（`pnpm-workspace.yaml`）。如果这些包正式发布前需要重新生成 lockfile，请保留
-`autoInstallPeers: false`。
+DSH 和 React 包在本插件中是由宿主提供的 optional peer dependencies。
+v0.1.2-rc.1 profile 关闭了 peer 自动安装（`autoInstallPeers: false`），因此安装
+本插件时不应额外安装或要求 profile 再声明一份内置平台包。
 
 Workspace 行的“浏览文件”入口仍是兼容补丁，因为上游
 `@deepseek-ai/dsh-client-ui-workspace` 还没有第三方菜单 Slot。每次更新 Harness

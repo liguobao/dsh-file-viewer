@@ -30054,6 +30054,9 @@ ${exception.mark.snippet}`), `${exception.reason} ${where}`) : exception.reason;
       function FileViewerPanel(props) {
         let { api, t } = props, state = useViewerState();
         React.useEffect(() => {
+          let request = props.viewRequest;
+          request?.view === "dsh-file-viewer" && (api.openFile(request.focus), props.completeViewRequest?.());
+        }, [api, props.viewRequest, props.completeViewRequest]), React.useEffect(() => {
           let onKeyDown = (event) => {
             event.key === "Escape" && leaveFileViewerTab();
           };

@@ -44,11 +44,11 @@ describe('host RPC compatibility', () => {
     })
   })
 
-  it('also works with the alpha handler shape that ignores extra arguments', () => {
-    const alphaHandle = vi.fn((_channel: string, _handler: unknown) => async () => {})
+  it('works with the dsh-v0.1.2-rc.1 two-argument handler shape', () => {
+    const rc1Handle = vi.fn((_channel: string, _handler: unknown) => async () => {})
 
-    apply(createHost({ rpc: { handle: alphaHandle } }))
+    apply(createHost({ rpc: { handle: rc1Handle } }))
 
-    expect(alphaHandle).toHaveBeenCalledOnce()
+    expect(rc1Handle).toHaveBeenCalledOnce()
   })
 })

@@ -10,7 +10,7 @@ architecture (Step 1) and the resulting design (Step 2).
 
 All findings below come from reading the installed packages under
 `@deepseek-ai/dsh` (initially v0.1.0-rc.6), the published v0.1.1-rc.2
-packages, and the local `deepseek-harness` v0.1.2-alpha.1 checkout, NOT from
+packages, and the local `deepseek-harness` `dsh-v0.1.2-rc.1` checkout, NOT from
 assumptions.
 
 ### 1.1 Plugin package shape
@@ -97,14 +97,17 @@ re-provide `chatFileMentions`, which ui-deliverables owns).
   maxBytes)` (hard-capped read — never buffers unbounded files),
   `streamText`, `listDir`, `processPath(target)`.
 - **Host→client RPC extension**: rc2 uses
-  `ctx.connection.rpc.handle(channel, handler, { authority })`; v0.1.2-alpha.1
+  `ctx.connection.rpc.handle(channel, handler, { authority })`; v0.1.2-rc.1
   uses `handle(channel, handler)`. File Viewer always supplies
-  `{ authority: 'loopback' }`: rc2 enforces it, while the alpha implementation
+  `{ authority: 'loopback' }`: rc2 enforces it, while the rc.1 implementation
   ignores the extra JavaScript argument. The call returns a disposer; handler returns
   `RpcResult` (`{ok:true,value}` | `{ok:false,error:{code,message,details}}`).
   Client side: `ctx.connection.rpc.call(channel, endpoint, payload)`.
 - **Client**: `ctx.workspaces.list` (workspace rows), `ctx.sessions.list`
   (current and live session cwd), and browser RPC calls to `/fileviewer`.
+  v0.1.2-rc.1's `conversation.view` owner can also deliver a one-shot
+  `{ view, focus }` request; File Viewer consumes `focus` as its locator and
+  acknowledges it with `completeViewRequest()`.
   `resolveWorkspacePath(cwd, path)` moved to
   `@deepseek-ai/dsh-util-workspace-path`; this plugin keeps an equivalent
   local helper to avoid a client-bundle runtime dependency.
