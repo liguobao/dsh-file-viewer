@@ -37,11 +37,12 @@ export interface ApiProxyLike {
 }
 
 export interface WorkspaceRegistryLike {
-  list(): Array<{ path?: string } | undefined>
+  list(): unknown[] | { items?: unknown[]; byId?: Record<string, unknown> } | Map<unknown, unknown> | Set<unknown> | Promise<unknown>
 }
 
 export interface HostSessionsLike {
-  list(): Array<{ cwd?: string; header?: { cwd?: string } } | undefined>
+  list?(): unknown[] | { items?: unknown[]; byId?: Record<string, unknown> } | Map<unknown, unknown> | Set<unknown> | Promise<unknown>
+  all?(): unknown[] | { items?: unknown[]; byId?: Record<string, unknown> } | Map<unknown, unknown> | Set<unknown> | Promise<unknown>
 }
 
 export interface SessionControllerLike {
@@ -78,15 +79,18 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
   }
 
   async stat(locator: string, signal: AbortSignal): Promise<FileViewerContentMeta | undefined> {
-    const { path } = await this.resolveChecked(locator, signal)
-    const info = await fsStat(path).catch(() => undefined)
+    const { target, path } = await this.resolveChecked(locator, signal)
+    const info = await this.options.fs.stat(target, signal).catch(() => undefined)
     if (info === undefined) return undefined
+    const displayPath = target.displayPath ?? path
+    const nativeInfo = await fsStat(path).catch(() => undefined)
+    const isDirectory = info.type === 'directory'
     return {
-      name: basename(path),
-      size: info.isDirectory() ? 0 : info.size,
-      mime: mimeFromExtension(path),
-      mtimeMs: info.mtimeMs,
-      isDirectory: info.isDirectory(),
+      name: basename(displayPath),
+      size: isDirectory ? 0 : info.size ?? nativeInfo?.size ?? 0,
+      mime: mimeFromExtension(displayPath),
+      mtimeMs: nativeInfo?.mtimeMs,
+      isDirectory,
     }
   }
 
@@ -103,14 +107,15 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
   }
 
   async list(locator: string, signal: AbortSignal): Promise<FileViewerContentEntry[]> {
-    const { target, path } = await this.resolveChecked(locator, signal)
-    const info = await fsStat(path).catch(() => undefined)
+    const { target } = await this.resolveChecked(locator, signal)
+    const info = await this.options.fs.stat(target, signal).catch(() => undefined)
     if (info === undefined) throw new Error('The directory does not exist.')
-    if (!info.isDirectory()) throw new Error('The locator is not a directory.')
+    if (info.type !== 'directory') throw new Error('The locator is not a directory.')
     const listing = await this.options.fs.listDir(target, signal)
     const entries: FileViewerContentEntry[] = []
     for (const entry of listing) {
       const childPath = this.options.fs.processPath(entry.target)
+      const childLocator = entry.target.displayPath ?? childPath
       const isDirectory = entry.type === 'directory'
       let size = entry.size
       let mtimeMs: number | undefined
@@ -122,10 +127,10 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
         // Preserve stale directory entries without optional metadata.
       }
       entries.push({
-        locator: childPath,
+        locator: childLocator,
         name: entry.name,
         size: size ?? 0,
-        mime: mimeFromExtension(childPath),
+        mime: mimeFromExtension(childLocator),
         mtimeMs,
         isDirectory,
       })
@@ -162,11 +167,20 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
       } catch {
         continue
       }
-      if (this.options.fs.contains(rootTarget, target) || isPathInside(rootTarget.targetKey, target.targetKey)) {
+      if (this.isInsideAllowedRoot(rootTarget, target)) {
         return { target, path: this.options.fs.processPath(target) }
       }
     }
     throw new Error('Access denied: the locator is outside the allowed workspaces.')
+  }
+
+  private isInsideAllowedRoot(root: FsTargetLike, target: FsTargetLike): boolean {
+    if (this.options.fs.contains(root, target) || isPathInside(root.targetKey, target.targetKey)) return true
+    try {
+      return isPathInside(this.options.fs.processPath(root), this.options.fs.processPath(target))
+    } catch {
+      return false
+    }
   }
 
   private async allowedRoots(): Promise<string[]> {
@@ -174,10 +188,7 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
     const workspaceRegistry = this.currentWorkspaceRegistry()
     if (workspaceRegistry !== undefined) {
       try {
-        for (const workspace of workspaceRegistry.list()) {
-          const root = typeof workspace?.path === 'string' ? normalizeRootPath(workspace.path) : ''
-          if (root !== '') roots.add(root)
-        }
+        for (const workspace of entriesFrom(await workspaceRegistry.list())) addRoot(roots, workspacePath(workspace))
       } catch {
         // Fall through to other root sources when the workspace registry is still booting.
       }
@@ -185,11 +196,8 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
     const sessions = this.currentSessions()
     if (sessions !== undefined) {
       try {
-        for (const session of sessions.list()) {
-          const cwd = session?.header?.cwd ?? session?.cwd
-          const root = typeof cwd === 'string' ? normalizeRootPath(cwd) : ''
-          if (root !== '') roots.add(root)
-        }
+        const listed = sessions.list !== undefined ? await sessions.list() : await sessions.all?.()
+        for (const session of entriesFrom(listed)) addRoot(roots, sessionCwd(session))
       } catch {
         // Live session roots are opportunistic; static roots still apply.
       }
@@ -199,10 +207,7 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
       try {
         const response = await apiProxy.workspace.list({ rpcId: 'file-viewer-roots', payload: {} })
         if (response.result.ok && response.result.value !== undefined) {
-          for (const workspace of response.result.value.items) {
-            const root = normalizeRootPath(workspace.path)
-            if (root !== '') roots.add(root)
-          }
+          for (const workspace of entriesFrom(response.result.value.items)) addRoot(roots, workspacePath(workspace))
         }
       } catch {
         // Fall back to static roots when the workspace service is temporarily unavailable.
@@ -210,11 +215,7 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
       try {
         const response = await apiProxy.sessions?.list({ rpcId: 'file-viewer-session-roots', payload: {} })
         if (response?.result.ok && response.result.value !== undefined) {
-          for (const session of response.result.value.items) {
-            if (session.cwd === undefined) continue
-            const root = normalizeRootPath(session.cwd)
-            if (root !== '') roots.add(root)
-          }
+          for (const session of entriesFrom(response.result.value.items)) addRoot(roots, sessionCwd(session))
         }
       } catch {
         // Session cwd roots are an opportunistic fallback for ungrouped sessions.
@@ -242,4 +243,49 @@ export class LocalFileContentProvider implements FileViewerContentProvider {
 
 function isRpcResult(value: unknown): value is { ok: boolean; error: { message?: string } } {
   return typeof value === 'object' && value !== null && typeof (value as { ok?: unknown }).ok === 'boolean'
+}
+
+function addRoot(roots: Set<string>, candidate: unknown): void {
+  if (typeof candidate !== 'string') return
+  const root = normalizeRootPath(candidate)
+  if (root !== '') roots.add(root)
+}
+
+function entriesFrom(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value
+  if (value instanceof Map || value instanceof Set) return [...value.values()]
+  if (!isRecord(value)) return []
+  if (Array.isArray(value.items)) return value.items
+  if (value.items instanceof Map || value.items instanceof Set) return [...value.items.values()]
+  if (isRecord(value.byId)) return Object.values(value.byId)
+  return []
+}
+
+function workspacePath(value: unknown): string | undefined {
+  return firstString(value, ['path'], ['workspace', 'path'], ['root', 'path'])
+}
+
+function sessionCwd(value: unknown): string | undefined {
+  return firstString(value, ['cwd'], ['header', 'cwd'], ['summary', 'cwd'], ['meta', 'cwd'])
+}
+
+function firstString(value: unknown, ...paths: string[][]): string | undefined {
+  for (const path of paths) {
+    const result = nestedString(value, path)
+    if (result !== undefined) return result
+  }
+  return undefined
+}
+
+function nestedString(value: unknown, path: string[]): string | undefined {
+  let current = value
+  for (const segment of path) {
+    if (!isRecord(current)) return undefined
+    current = current[segment]
+  }
+  return typeof current === 'string' ? current : undefined
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
 }

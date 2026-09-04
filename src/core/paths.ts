@@ -29,6 +29,8 @@ export function isPathInside(root: string, candidate: string): boolean {
   const r = comparisonPath(root)
   const c = comparisonPath(candidate)
   if (c === r) return true
+  if (r === '/') return c.startsWith('/')
+  if (/^[a-z]:\/$/i.test(r)) return c.startsWith(r)
   return c.startsWith(`${r}/`)
 }
 
@@ -92,7 +94,17 @@ export function hasTraversal(path: string): boolean {
 }
 
 function comparisonPath(path: string): string {
-  const normalized = resolveSegments(path).join('/')
+  const separated = normalizeSeparators(path)
+  const drive = separated.match(/^([A-Za-z]:)(?:\/(.*))?$/)
+  let normalized: string
+  if (drive !== null) {
+    const tail = resolveSegments(drive[2] ?? '').join('/')
+    normalized = tail === '' ? `${drive[1]}/` : `${drive[1]}/${tail}`
+  } else {
+    const absolute = separated.startsWith('/')
+    const segments = resolveSegments(separated).join('/')
+    normalized = absolute ? (segments === '' ? '/' : `/${segments}`) : segments
+  }
   return isWindowsLikePath(path) ? normalized.toLowerCase() : normalized
 }
 

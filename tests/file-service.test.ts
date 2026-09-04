@@ -225,6 +225,56 @@ describe('file-viewer service', () => {
     expect((result as { ok: true; value: { name: string } }).value.name).toBe('notes.txt')
   })
 
+  it('accepts roots from wrapped workspace and session snapshots', async () => {
+    const file = join(root, 'notes.txt')
+    const providers = new FileViewerContentRegistry()
+    providers.register(new LocalFileContentProvider({
+      fs: fakeFs(root),
+      workspaceRegistry: {
+        list() {
+          return { items: [{ workspace: { path: join(root, 'missing') } }] }
+        },
+      },
+      sessions: {
+        all() {
+          return { byId: { active: { summary: { cwd: root } } } }
+        },
+      },
+      roots: [],
+    }))
+    const wrappedRootsService = new FileViewerService({ providers })
+    const result = await wrappedRootsService.handle('stat', { path: file }, new AbortController().signal)
+
+    expect(result.ok).toBe(true)
+    expect((result as { ok: true; value: { name: string } }).value.name).toBe('notes.txt')
+  })
+
+  it('accepts process-path containment when target keys are opaque', async () => {
+    const file = join(root, 'notes.txt')
+    const providers = new FileViewerContentRegistry()
+    providers.register(new LocalFileContentProvider({
+      fs: fakeFs(root, {
+        async resolve(path) {
+          if (path === root) return { targetKey: 'opaque-root', displayPath: root }
+          if (path === file) return { targetKey: 'opaque-file', displayPath: file }
+          return { targetKey: path, displayPath: path }
+        },
+        contains() {
+          return false
+        },
+        processPath(target) {
+          return target.displayPath ?? target.targetKey
+        },
+      }),
+      roots: [root],
+    }))
+    const opaqueTargetService = new FileViewerService({ providers })
+    const result = await opaqueTargetService.handle('stat', { path: file }, new AbortController().signal)
+
+    expect(result.ok).toBe(true)
+    expect((result as { ok: true; value: { name: string } }).value.name).toBe('notes.txt')
+  })
+
   it('accepts Windows roots discovered from apiProxy at request time', async () => {
     const file = join(root, 'notes.txt')
     const windowsRoot = 'c:\\workspace\\project\\'

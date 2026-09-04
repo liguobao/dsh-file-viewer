@@ -62,17 +62,20 @@ export interface ApiProxyLike {
     };
 }
 export interface WorkspaceRegistryLike {
-    list(): Array<{
-        path?: string;
-    } | undefined>;
+    list(): unknown[] | {
+        items?: unknown[];
+        byId?: Record<string, unknown>;
+    } | Map<unknown, unknown> | Set<unknown> | Promise<unknown>;
 }
 export interface HostSessionsLike {
-    list(): Array<{
-        cwd?: string;
-        header?: {
-            cwd?: string;
-        };
-    } | undefined>;
+    list?(): unknown[] | {
+        items?: unknown[];
+        byId?: Record<string, unknown>;
+    } | Map<unknown, unknown> | Set<unknown> | Promise<unknown>;
+    all?(): unknown[] | {
+        items?: unknown[];
+        byId?: Record<string, unknown>;
+    } | Map<unknown, unknown> | Set<unknown> | Promise<unknown>;
 }
 export interface SessionControllerLike {
     openWorkspacePath(request: {
@@ -113,6 +116,7 @@ export declare class LocalFileContentProvider implements FileViewerContentProvid
     list(locator: string, signal: AbortSignal): Promise<FileViewerContentEntry[]>;
     openExternal(locator: string, signal: AbortSignal): Promise<void>;
     private resolveChecked;
+    private isInsideAllowedRoot;
     private allowedRoots;
     private currentApiProxy;
     private currentWorkspaceRegistry;

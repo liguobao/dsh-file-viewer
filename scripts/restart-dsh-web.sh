@@ -19,6 +19,14 @@ echo "==== $(date '+%F %T') dsh web restart ===="
 echo "plugin version: $("$NODE" -e "console.log(require('$REPO/package.json').version)")"
 echo "git head: $(git -C "$REPO" log --oneline -1 2>/dev/null)"
 
+# ---------- ensure profile uses this checkout ----------
+echo "--- ensure dsh-file-viewer for web profile ---"
+if ! "$NODE" "$DSH_BIN" plugin --profile web add "$REPO"; then
+  echo "PLUGIN INSTALL FAILED -- aborting, live service untouched"
+  echo "==== abort $(date '+%F %T') ===="
+  exit 1
+fi
+
 # ---------- preflight: boot dsh web on 43124 ----------
 echo "--- preflight: boot dsh web on 43124 ---"
 "$NODE" "$DSH_BIN" web --host 127.0.0.1 --port 43124 >"$PRE_LOG" 2>&1 &
@@ -26,7 +34,7 @@ PRE_PID=$!
 PRE_OK=0
 for i in $(seq 1 25); do
   CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 2 http://127.0.0.1:43124/ 2>/dev/null || echo 000)
-  if [ "$CODE" = "200" ]; then PRE_OK=1; break; fi
+  if [ "$CODE" = "200" ] || [ "$CODE" = "401" ]; then PRE_OK=1; break; fi
   kill -0 "$PRE_PID" 2>/dev/null || break
   sleep 1
 done
@@ -66,7 +74,7 @@ echo "new pid=$NEW_PID"
 UP=0
 for i in $(seq 1 60); do
   CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 2 http://127.0.0.1:43123/ 2>/dev/null || echo 000)
-  if [ "$CODE" = "200" ]; then UP=1; break; fi
+  if [ "$CODE" = "200" ] || [ "$CODE" = "401" ]; then UP=1; break; fi
   kill -0 "$NEW_PID" 2>/dev/null || break
   sleep 1
 done

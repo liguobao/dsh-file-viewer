@@ -27,6 +27,9 @@ describe('path validation', () => {
     expect(isPathInside('/workspace', '/workspace/a.txt')).toBe(true)
     expect(isPathInside('/workspace', '/workspace')).toBe(true)
     expect(isPathInside('/workspace', '/workspace/sub/deep.txt')).toBe(true)
+    expect(isPathInside('/', '/workspace/a.txt')).toBe(true)
+    expect(isPathInside('/', '/')).toBe(true)
+    expect(isPathInside('/', 'workspace/a.txt')).toBe(false)
     expect(isPathInside('/workspace', '/etc/passwd')).toBe(false)
     expect(isPathInside('/workspace', '/workspace-secret/x')).toBe(false) // prefix, not a real child
     expect(isPathInside('/workspace', '/workspace/../etc/passwd')).toBe(false)

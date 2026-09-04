@@ -145,6 +145,8 @@ function isPathInside(root, candidate) {
   const r = comparisonPath(root);
   const c = comparisonPath(candidate);
   if (c === r) return true;
+  if (r === "/") return c.startsWith("/");
+  if (/^[a-z]:\/$/i.test(r)) return c.startsWith(r);
   return c.startsWith(`${r}/`);
 }
 function resolveSegments(path) {
@@ -172,7 +174,17 @@ function normalizeRootPath(path) {
   return trimmed.replace(/[/\\]+$/, "");
 }
 function comparisonPath(path) {
-  const normalized = resolveSegments(path).join("/");
+  const separated = normalizeSeparators(path);
+  const drive = separated.match(/^([A-Za-z]:)(?:\/(.*))?$/);
+  let normalized;
+  if (drive !== null) {
+    const tail = resolveSegments(drive[2] ?? "").join("/");
+    normalized = tail === "" ? `${drive[1]}/` : `${drive[1]}/${tail}`;
+  } else {
+    const absolute = separated.startsWith("/");
+    const segments = resolveSegments(separated).join("/");
+    normalized = absolute ? segments === "" ? "/" : `/${segments}` : segments;
+  }
   return isWindowsLikePath(path) ? normalized.toLowerCase() : normalized;
 }
 function isWindowsLikePath(path) {
@@ -363,15 +375,18 @@ var LocalFileContentProvider = class {
     return true;
   }
   async stat(locator, signal) {
-    const { path } = await this.resolveChecked(locator, signal);
-    const info = await fsStat(path).catch(() => void 0);
+    const { target, path } = await this.resolveChecked(locator, signal);
+    const info = await this.options.fs.stat(target, signal).catch(() => void 0);
     if (info === void 0) return void 0;
+    const displayPath = target.displayPath ?? path;
+    const nativeInfo = await fsStat(path).catch(() => void 0);
+    const isDirectory = info.type === "directory";
     return {
-      name: basename(path),
-      size: info.isDirectory() ? 0 : info.size,
-      mime: mimeFromExtension(path),
-      mtimeMs: info.mtimeMs,
-      isDirectory: info.isDirectory()
+      name: basename(displayPath),
+      size: isDirectory ? 0 : info.size ?? nativeInfo?.size ?? 0,
+      mime: mimeFromExtension(displayPath),
+      mtimeMs: nativeInfo?.mtimeMs,
+      isDirectory
     };
   }
   async read(locator, request) {
@@ -386,14 +401,15 @@ var LocalFileContentProvider = class {
     }
   }
   async list(locator, signal) {
-    const { target, path } = await this.resolveChecked(locator, signal);
-    const info = await fsStat(path).catch(() => void 0);
+    const { target } = await this.resolveChecked(locator, signal);
+    const info = await this.options.fs.stat(target, signal).catch(() => void 0);
     if (info === void 0) throw new Error("The directory does not exist.");
-    if (!info.isDirectory()) throw new Error("The locator is not a directory.");
+    if (info.type !== "directory") throw new Error("The locator is not a directory.");
     const listing = await this.options.fs.listDir(target, signal);
     const entries = [];
     for (const entry of listing) {
       const childPath = this.options.fs.processPath(entry.target);
+      const childLocator = entry.target.displayPath ?? childPath;
       const isDirectory = entry.type === "directory";
       let size = entry.size;
       let mtimeMs;
@@ -404,10 +420,10 @@ var LocalFileContentProvider = class {
       } catch {
       }
       entries.push({
-        locator: childPath,
+        locator: childLocator,
         name: entry.name,
         size: size ?? 0,
-        mime: mimeFromExtension(childPath),
+        mime: mimeFromExtension(childLocator),
         mtimeMs,
         isDirectory
       });
@@ -442,32 +458,34 @@ var LocalFileContentProvider = class {
       } catch {
         continue;
       }
-      if (this.options.fs.contains(rootTarget, target) || isPathInside(rootTarget.targetKey, target.targetKey)) {
+      if (this.isInsideAllowedRoot(rootTarget, target)) {
         return { target, path: this.options.fs.processPath(target) };
       }
     }
     throw new Error("Access denied: the locator is outside the allowed workspaces.");
+  }
+  isInsideAllowedRoot(root, target) {
+    if (this.options.fs.contains(root, target) || isPathInside(root.targetKey, target.targetKey)) return true;
+    try {
+      return isPathInside(this.options.fs.processPath(root), this.options.fs.processPath(target));
+    } catch {
+      return false;
+    }
   }
   async allowedRoots() {
     const roots = new Set(this.options.roots.map(normalizeRootPath).filter((root) => root !== ""));
     const workspaceRegistry = this.currentWorkspaceRegistry();
     if (workspaceRegistry !== void 0) {
       try {
-        for (const workspace of workspaceRegistry.list()) {
-          const root = typeof workspace?.path === "string" ? normalizeRootPath(workspace.path) : "";
-          if (root !== "") roots.add(root);
-        }
+        for (const workspace of entriesFrom(await workspaceRegistry.list())) addRoot(roots, workspacePath(workspace));
       } catch {
       }
     }
     const sessions = this.currentSessions();
     if (sessions !== void 0) {
       try {
-        for (const session of sessions.list()) {
-          const cwd = session?.header?.cwd ?? session?.cwd;
-          const root = typeof cwd === "string" ? normalizeRootPath(cwd) : "";
-          if (root !== "") roots.add(root);
-        }
+        const listed = sessions.list !== void 0 ? await sessions.list() : await sessions.all?.();
+        for (const session of entriesFrom(listed)) addRoot(roots, sessionCwd(session));
       } catch {
       }
     }
@@ -476,21 +494,14 @@ var LocalFileContentProvider = class {
       try {
         const response = await apiProxy.workspace.list({ rpcId: "file-viewer-roots", payload: {} });
         if (response.result.ok && response.result.value !== void 0) {
-          for (const workspace of response.result.value.items) {
-            const root = normalizeRootPath(workspace.path);
-            if (root !== "") roots.add(root);
-          }
+          for (const workspace of entriesFrom(response.result.value.items)) addRoot(roots, workspacePath(workspace));
         }
       } catch {
       }
       try {
         const response = await apiProxy.sessions?.list({ rpcId: "file-viewer-session-roots", payload: {} });
         if (response?.result.ok && response.result.value !== void 0) {
-          for (const session of response.result.value.items) {
-            if (session.cwd === void 0) continue;
-            const root = normalizeRootPath(session.cwd);
-            if (root !== "") roots.add(root);
-          }
+          for (const session of entriesFrom(response.result.value.items)) addRoot(roots, sessionCwd(session));
         }
       } catch {
       }
@@ -512,6 +523,44 @@ var LocalFileContentProvider = class {
 };
 function isRpcResult(value) {
   return typeof value === "object" && value !== null && typeof value.ok === "boolean";
+}
+function addRoot(roots, candidate) {
+  if (typeof candidate !== "string") return;
+  const root = normalizeRootPath(candidate);
+  if (root !== "") roots.add(root);
+}
+function entriesFrom(value) {
+  if (Array.isArray(value)) return value;
+  if (value instanceof Map || value instanceof Set) return [...value.values()];
+  if (!isRecord(value)) return [];
+  if (Array.isArray(value.items)) return value.items;
+  if (value.items instanceof Map || value.items instanceof Set) return [...value.items.values()];
+  if (isRecord(value.byId)) return Object.values(value.byId);
+  return [];
+}
+function workspacePath(value) {
+  return firstString(value, ["path"], ["workspace", "path"], ["root", "path"]);
+}
+function sessionCwd(value) {
+  return firstString(value, ["cwd"], ["header", "cwd"], ["summary", "cwd"], ["meta", "cwd"]);
+}
+function firstString(value, ...paths) {
+  for (const path of paths) {
+    const result = nestedString(value, path);
+    if (result !== void 0) return result;
+  }
+  return void 0;
+}
+function nestedString(value, path) {
+  let current = value;
+  for (const segment of path) {
+    if (!isRecord(current)) return void 0;
+    current = current[segment];
+  }
+  return typeof current === "string" ? current : void 0;
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null;
 }
 
 // src/index.ts
