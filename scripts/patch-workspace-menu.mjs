@@ -15,7 +15,8 @@
  *   3. the `browseFiles` dictionary key in both zh and en
  *
  * It is idempotent and aborts loudly if an anchor is missing (version drift),
- * so it can be re-run safely after Harness updates.
+ * so it can be re-run safely after Harness updates. Source anchors are
+ * verified through deepseek-harness tag dsh-v0.1.5-rc.1.
  */
 
 import { readFile, writeFile, rename, access } from 'node:fs/promises'

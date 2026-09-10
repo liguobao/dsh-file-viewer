@@ -10,8 +10,8 @@ architecture (Step 1) and the resulting design (Step 2).
 
 All findings below come from reading the installed packages under
 `@deepseek-ai/dsh` (initially v0.1.0-rc.6), the published v0.1.1-rc.2
-packages, and the local `deepseek-harness` `dsh-v0.1.2-rc.1` checkout, NOT from
-assumptions.
+packages, and local `deepseek-harness` checkouts through `dsh-v0.1.5-rc.1`,
+NOT from assumptions.
 
 ### 1.1 Plugin package shape
 
@@ -28,7 +28,7 @@ A DSH plugin is an npm package with two halves (model: `dsh-remote`):
 - **package.json** declares:
   - `"dsh": { "client": { "inject": [...], "platform": "web" }, "bundle": { "patch": "./cordis.patch.yml" } }`
   - `dsh.client.inject` = package-level client graph edges used for factory
-    arrival and Cordis composition. The v0.1.2 loader treats these as package
+    arrival and Cordis composition. The v0.1.2+ loader treats these as package
     dependencies; non-baseline runtime `require()` specifiers belong in
     `dsh.client.external`.
   - `dsh.bundle.patch` = a YAML patch layer applied when the package joins a
@@ -97,7 +97,7 @@ re-provide `chatFileMentions`, which ui-deliverables owns).
   maxBytes)` (hard-capped read — never buffers unbounded files),
   `streamText`, `listDir`, `processPath(target)`.
 - **Host→client RPC extension**: rc2 uses
-  `ctx.connection.rpc.handle(channel, handler, { authority })`; v0.1.2-rc.1
+  `ctx.connection.rpc.handle(channel, handler, { authority })`; v0.1.2+
   uses `handle(channel, handler)`. File Viewer always supplies
   `{ authority: 'loopback' }`: rc2 enforces it, while the rc.1 implementation
   ignores the extra JavaScript argument. The call returns a disposer; handler returns
@@ -105,7 +105,7 @@ re-provide `chatFileMentions`, which ui-deliverables owns).
   Client side: `ctx.connection.rpc.call(channel, endpoint, payload)`.
 - **Client**: `ctx.workspaces.list` (workspace rows), `ctx.sessions.list`
   (current and live session cwd), and browser RPC calls to `/fileviewer`.
-  v0.1.2-rc.1's `conversation.view` owner can also deliver a one-shot
+  v0.1.2+ `conversation.view` owners can also deliver a one-shot
   `{ view, focus }` request; File Viewer consumes `focus` as its locator and
   acknowledges it with `completeViewRequest()`.
   `resolveWorkspacePath(cwd, path)` moved to
@@ -199,7 +199,8 @@ reject otherwise (`bad-request` / `internal` codes, message-carrying).
 - **Workspace "…" menu entry**: ui-workspace's row menu
   (`ProjectRowItem` → `workspaceMenuItems`) has no slot hook, so
   `scripts/patch-workspace-menu.mjs` applies three guarded, idempotent edits
-  either to the v0.1.2 source checkout (`Rows.tsx` + `locales.ts`) or to the
+  either to a v0.1.2+ source checkout (`Rows.tsx` + `locales.ts`, verified
+  through `dsh-v0.1.5-rc.1`) or to the
   installed bundle: a `browseFiles` menu item, an `onSelect` branch calling
   `window.__dsfvBrowseWorkspace(workspaceId)` (installed by this plugin's
   client), and zh/en dictionary keys. Version drift aborts loudly.

@@ -18,4 +18,18 @@ describe('DSH profile compatibility', () => {
 
     expect(requiredPeers).toEqual([])
   })
+
+  it('explicitly accepts the latest verified DSH prerelease package graph', () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as PackageManifest
+    const dshPeers = Object.entries(manifest.peerDependencies ?? {}).filter(([peer]) =>
+      peer.startsWith('@deepseek-ai/dsh-'),
+    )
+
+    expect(dshPeers.length).toBeGreaterThan(0)
+    expect(
+      dshPeers.filter(([, range]) => !range.includes('>=0.1.5-rc.1 <0.2.0')),
+    ).toEqual([])
+  })
 })
