@@ -6,6 +6,7 @@
  * are only an optional backwards-compatible provider.
  */
 import s from '@deepseek-ai/schemastery';
+import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
 export declare const name = "dsh-file-viewer";
 export interface Config {
     enabled?: boolean;
@@ -28,11 +29,21 @@ export interface HostContextLike {
     };
 }
 export interface HostConnectionLike {
+    requestRejection?(request: {
+        headers: IncomingHttpHeaders;
+    }): number | undefined;
     rpc: {
         handle(channel: string, handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>, options: {
             authority: 'loopback' | 'trusted-host';
         }): () => Promise<void>;
     };
+}
+export interface HostWebServerLike {
+    register(route: {
+        kind: 'prefix';
+        path: string;
+        handler(req: IncomingMessage, res: ServerResponse): void | Promise<void>;
+    }): () => void | Promise<void>;
 }
 /**
  * Host-side service exposed to trusted plugins as `fileViewerHost`.

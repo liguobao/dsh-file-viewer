@@ -3,5 +3,7 @@
 - insert:
     - id: dsh-file-viewer
       name: dsh-file-viewer
+      inject:
+        - webServer
       config:
         enabled: true

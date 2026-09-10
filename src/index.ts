@@ -7,6 +7,7 @@
  */
 
 import s from '@deepseek-ai/schemastery'
+import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http'
 import { FileViewerService } from './server/file-service.js'
 import { FileViewerContentRegistry } from './server/content-provider.js'
 import {
@@ -40,6 +41,10 @@ function resolveConfig(input: Config = {}): Required<Config> {
   return { enabled: input.enabled ?? true, extraRoots }
 }
 
+const FILEVIEWER_CHANNEL = '/fileviewer'
+const ENDPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9_$.-]+$/
+const INVALID_REQUEST_RPC_ID = 'invalid-request'
+
 /** Minimal structural host context (what this plugin actually uses). */
 export interface HostContextLike {
   inject(services: string[], callback: (ctx: HostContextLike) => void | Promise<void>): void
@@ -50,6 +55,7 @@ export interface HostContextLike {
 }
 
 export interface HostConnectionLike {
+  requestRejection?(request: { headers: IncomingHttpHeaders }): number | undefined
   rpc: {
     handle(
       channel: string,
@@ -60,6 +66,14 @@ export interface HostConnectionLike {
       options: { authority: 'loopback' | 'trusted-host' },
     ): () => Promise<void>
   }
+}
+
+export interface HostWebServerLike {
+  register(route: {
+    kind: 'prefix'
+    path: string
+    handler(req: IncomingMessage, res: ServerResponse): void | Promise<void>
+  }): () => void | Promise<void>
 }
 
 /**
@@ -80,7 +94,7 @@ export function apply(ctx: HostContextLike, input: Config = {}): void {
     log: (level, message, fields) => ctx.logger[level](`dsh-file-viewer: ${message}`, fields),
   })
   ctx.provide('fileViewerContent', providers)
-  ctx.inject(['connection'], (runtime) => {
+  ctx.inject(['connection', 'webServer'], (runtime) => {
     void activate(runtime, input, providers, service)
   })
 }
@@ -137,18 +151,158 @@ async function activate(
     ctx.logger.info('dsh-file-viewer: ctx.fs is unavailable; waiting for registered content providers')
   }
 
-  await ctx.effect(() => {
-    const dispose = connection.rpc.handle(
-      '/fileviewer',
-      (endpoint, payload, signal) => service.handle(endpoint, payload, signal),
-      { authority: 'loopback' },
-    )
-    ctx.logger.debug('dsh-file-viewer: /fileviewer channel registered')
-    return async () => {
-      unregisterLocalFiles?.()
-      await dispose()
-    }
-  }, 'dsh-file-viewer: rpc channel')
+  const webServer = ctx.get<HostWebServerLike>('webServer')
+  if (webServer !== undefined && connection.requestRejection !== undefined) {
+    await ctx.effect(() => {
+      const dispose = webServer.register({
+        kind: 'prefix',
+        path: FILEVIEWER_CHANNEL,
+        handler: (req, res) => handleFileViewerRequest(connection, service, req, res),
+      })
+      ctx.logger.debug('dsh-file-viewer: /fileviewer channel registered')
+      return async () => {
+        unregisterLocalFiles?.()
+        await dispose()
+      }
+    }, 'dsh-file-viewer: rpc channel')
+  } else {
+    await ctx.effect(() => {
+      const dispose = connection.rpc.handle(
+        FILEVIEWER_CHANNEL,
+        (endpoint, payload, signal) => service.handle(endpoint, payload, signal),
+        { authority: 'loopback' },
+      )
+      ctx.logger.debug('dsh-file-viewer: /fileviewer channel registered')
+      return async () => {
+        unregisterLocalFiles?.()
+        await dispose()
+      }
+    }, 'dsh-file-viewer: rpc channel')
+  }
+}
+
+async function handleFileViewerRequest(
+  connection: HostConnectionLike,
+  service: FileViewerService,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const rejection = connection.requestRejection?.(req)
+  if (rejection !== undefined) {
+    res.writeHead(rejection)
+    res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+    return
+  }
+
+  const endpoint = endpointFromPath(FILEVIEWER_CHANNEL, new URL(req.url ?? '/', 'http://dsh.internal').pathname)
+  if (req.method !== 'POST' || endpoint === undefined) {
+    writeText(res, 404, 'not found')
+    return
+  }
+  if (contentType(req.headers) !== 'application/json') {
+    writeText(res, 415, 'content type must be application/json')
+    return
+  }
+
+  let body: unknown
+  try {
+    body = await readJsonBody(req)
+  } catch {
+    writeText(res, 400, 'body is not JSON')
+    return
+  }
+
+  const message = clientRequest(body)
+  if (message === undefined) {
+    writeJson(res, 200, errorResponse(rpcId(body), {
+      code: 'gateway/bad-request',
+      message: 'invalid client-request message',
+      details: { issues: [] },
+    }))
+    return
+  }
+  if (message.method !== endpoint) {
+    writeJson(res, 200, errorResponse(message.rpcId, {
+      code: 'gateway/bad-request',
+      message: `method ${JSON.stringify(message.method)} does not match endpoint ${JSON.stringify(endpoint)}`,
+      details: { issues: [] },
+    }))
+    return
+  }
+
+  try {
+    const result = await service.handle(endpoint, message.payload, requestSignal(req))
+    writeJson(res, 200, fullResponse(message.rpcId, result))
+  } catch (error) {
+    writeText(res, 500, `handler failure: ${String(error)}`)
+  }
+}
+
+function endpointFromPath(channel: string, pathname: string): string | undefined {
+  if (!pathname.startsWith(`${channel}/`)) return undefined
+  const endpoint = pathname.slice(channel.length + 1)
+  if (endpoint.split('/').some((segment) => segment === '' || segment === '.' || segment === '..' || !ENDPOINT_SEGMENT_PATTERN.test(segment))) {
+    return undefined
+  }
+  return endpoint
+}
+
+function contentType(headers: IncomingHttpHeaders): string | undefined {
+  const raw = headers['content-type']
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return value?.split(';', 1)[0]?.trim().toLowerCase()
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = []
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+}
+
+function requestSignal(req: IncomingMessage): AbortSignal {
+  const abort = new AbortController()
+  req.on('close', () => {
+    if (!req.complete) abort.abort()
+  })
+  return abort.signal
+}
+
+interface ClientRequestWire {
+  type: 'client-request'
+  rpcId: string
+  method: string
+  payload: unknown
+}
+
+function clientRequest(value: unknown): ClientRequestWire | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  if (record.type !== 'client-request' || typeof record.rpcId !== 'string' || typeof record.method !== 'string') return undefined
+  return { type: 'client-request', rpcId: record.rpcId, method: record.method, payload: record.payload }
+}
+
+function rpcId(value: unknown): string {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return INVALID_REQUEST_RPC_ID
+  const record = value as Record<string, unknown>
+  return typeof record.rpcId === 'string' ? record.rpcId : INVALID_REQUEST_RPC_ID
+}
+
+function errorResponse(rpcId: string, error: { code: string; message: string; details: Record<string, unknown> }): Record<string, unknown> {
+  return fullResponse(rpcId, { ok: false, error })
+}
+
+function fullResponse(rpcId: string, result: unknown): Record<string, unknown> {
+  return { type: 'server-response', rpcId, result }
+}
+
+function writeJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(body))
+}
+
+function writeText(res: ServerResponse, status: number, body: string): void {
+  res.writeHead(status)
+  res.end(body)
 }
 
 export { FileViewerContentRegistry } from './server/content-provider.js'

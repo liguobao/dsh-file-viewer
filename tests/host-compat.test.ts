@@ -1,11 +1,21 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import { apply, type HostConnectionLike, type HostContextLike } from '../src/index.js'
 
-function createHost(connection: HostConnectionLike): HostContextLike {
-  const services = new Map<string, unknown>([['connection', connection]])
+interface TestHostContext extends HostContextLike {
+  hasInjected(service: string): boolean
+}
+
+function createHost(connection: HostConnectionLike, extraServices: Record<string, unknown> = {}): TestHostContext {
+  const services = new Map<string, unknown>([
+    ['connection', connection],
+    ...Object.entries(extraServices),
+  ])
+  const injected = new Set<string>()
 
   const host: HostContextLike = {
-    inject(_services, callback) {
+    inject(requiredServices, callback) {
+      requiredServices.forEach((service) => injected.add(service))
       void callback(host)
     },
     effect(effect) {
@@ -25,7 +35,15 @@ function createHost(connection: HostConnectionLike): HostContextLike {
     },
   }
 
-  return host
+  return Object.assign(host, {
+    hasInjected(service: string): boolean {
+      return injected.has(service)
+    },
+  })
+}
+
+function readProfilePatch(): string {
+  return readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
 }
 
 describe('host RPC compatibility', () => {
@@ -50,5 +68,43 @@ describe('host RPC compatibility', () => {
     apply(createHost({ rpc: { handle: rc1Handle } }))
 
     expect(rc1Handle).toHaveBeenCalledOnce()
+  })
+
+  it('declares webServer before reading the connection RPC service on dsh-v0.1.5', () => {
+    const host = createHost({
+      rpc: {
+        handle: vi.fn(() => {
+          expect(host.hasInjected('webServer')).toBe(true)
+          return async () => {}
+        }),
+      },
+    })
+
+    apply(host)
+  })
+
+  it('registers the file viewer route directly when dsh-v0.1.5 exposes webServer and request rejection', () => {
+    const legacyHandle = vi.fn(() => async () => {})
+    const requestRejection = vi.fn(() => undefined)
+    const register = vi.fn(() => async () => {})
+
+    apply(createHost({
+      requestRejection,
+      rpc: { handle: legacyHandle },
+    }, {
+      webServer: { register },
+    }))
+
+    expect(legacyHandle).not.toHaveBeenCalled()
+    expect(register).toHaveBeenCalledOnce()
+    expect(register).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'prefix',
+      path: '/fileviewer',
+      handler: expect.any(Function),
+    }))
+  })
+
+  it('profile patch injects webServer for connection-owned RPC registration', () => {
+    expect(readProfilePatch()).toMatch(/inject:\s*\n\s*-\s*webServer/)
   })
 })

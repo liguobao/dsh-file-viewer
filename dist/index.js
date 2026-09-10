@@ -573,6 +573,9 @@ function resolveConfig(input = {}) {
   const extraRoots = (input.extraRoots ?? []).map(normalizeRootPath).filter((root) => root !== "");
   return { enabled: input.enabled ?? true, extraRoots };
 }
+var FILEVIEWER_CHANNEL = "/fileviewer";
+var ENDPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9_$.-]+$/;
+var INVALID_REQUEST_RPC_ID = "invalid-request";
 function apply(ctx, input = {}) {
   const providers = new FileViewerContentRegistry();
   const service = new FileViewerService({
@@ -580,7 +583,7 @@ function apply(ctx, input = {}) {
     log: (level, message, fields) => ctx.logger[level](`dsh-file-viewer: ${message}`, fields)
   });
   ctx.provide("fileViewerContent", providers);
-  ctx.inject(["connection"], (runtime) => {
+  ctx.inject(["connection", "webServer"], (runtime) => {
     void activate(runtime, input, providers, service);
   });
 }
@@ -624,18 +627,131 @@ async function activate(ctx, input, providers, service) {
   } else {
     ctx.logger.info("dsh-file-viewer: ctx.fs is unavailable; waiting for registered content providers");
   }
-  await ctx.effect(() => {
-    const dispose = connection.rpc.handle(
-      "/fileviewer",
-      (endpoint, payload, signal) => service.handle(endpoint, payload, signal),
-      { authority: "loopback" }
-    );
-    ctx.logger.debug("dsh-file-viewer: /fileviewer channel registered");
-    return async () => {
-      unregisterLocalFiles?.();
-      await dispose();
-    };
-  }, "dsh-file-viewer: rpc channel");
+  const webServer = ctx.get("webServer");
+  if (webServer !== void 0 && connection.requestRejection !== void 0) {
+    await ctx.effect(() => {
+      const dispose = webServer.register({
+        kind: "prefix",
+        path: FILEVIEWER_CHANNEL,
+        handler: (req, res) => handleFileViewerRequest(connection, service, req, res)
+      });
+      ctx.logger.debug("dsh-file-viewer: /fileviewer channel registered");
+      return async () => {
+        unregisterLocalFiles?.();
+        await dispose();
+      };
+    }, "dsh-file-viewer: rpc channel");
+  } else {
+    await ctx.effect(() => {
+      const dispose = connection.rpc.handle(
+        FILEVIEWER_CHANNEL,
+        (endpoint, payload, signal) => service.handle(endpoint, payload, signal),
+        { authority: "loopback" }
+      );
+      ctx.logger.debug("dsh-file-viewer: /fileviewer channel registered");
+      return async () => {
+        unregisterLocalFiles?.();
+        await dispose();
+      };
+    }, "dsh-file-viewer: rpc channel");
+  }
+}
+async function handleFileViewerRequest(connection, service, req, res) {
+  const rejection = connection.requestRejection?.(req);
+  if (rejection !== void 0) {
+    res.writeHead(rejection);
+    res.end(rejection === 401 ? "unauthorized" : "forbidden");
+    return;
+  }
+  const endpoint = endpointFromPath(FILEVIEWER_CHANNEL, new URL(req.url ?? "/", "http://dsh.internal").pathname);
+  if (req.method !== "POST" || endpoint === void 0) {
+    writeText(res, 404, "not found");
+    return;
+  }
+  if (contentType(req.headers) !== "application/json") {
+    writeText(res, 415, "content type must be application/json");
+    return;
+  }
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch {
+    writeText(res, 400, "body is not JSON");
+    return;
+  }
+  const message = clientRequest(body);
+  if (message === void 0) {
+    writeJson(res, 200, errorResponse(rpcId(body), {
+      code: "gateway/bad-request",
+      message: "invalid client-request message",
+      details: { issues: [] }
+    }));
+    return;
+  }
+  if (message.method !== endpoint) {
+    writeJson(res, 200, errorResponse(message.rpcId, {
+      code: "gateway/bad-request",
+      message: `method ${JSON.stringify(message.method)} does not match endpoint ${JSON.stringify(endpoint)}`,
+      details: { issues: [] }
+    }));
+    return;
+  }
+  try {
+    const result = await service.handle(endpoint, message.payload, requestSignal(req));
+    writeJson(res, 200, fullResponse(message.rpcId, result));
+  } catch (error) {
+    writeText(res, 500, `handler failure: ${String(error)}`);
+  }
+}
+function endpointFromPath(channel, pathname) {
+  if (!pathname.startsWith(`${channel}/`)) return void 0;
+  const endpoint = pathname.slice(channel.length + 1);
+  if (endpoint.split("/").some((segment) => segment === "" || segment === "." || segment === ".." || !ENDPOINT_SEGMENT_PATTERN.test(segment))) {
+    return void 0;
+  }
+  return endpoint;
+}
+function contentType(headers) {
+  const raw = headers["content-type"];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return value?.split(";", 1)[0]?.trim().toLowerCase();
+}
+async function readJsonBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+function requestSignal(req) {
+  const abort = new AbortController();
+  req.on("close", () => {
+    if (!req.complete) abort.abort();
+  });
+  return abort.signal;
+}
+function clientRequest(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return void 0;
+  const record2 = value;
+  if (record2.type !== "client-request" || typeof record2.rpcId !== "string" || typeof record2.method !== "string") return void 0;
+  return { type: "client-request", rpcId: record2.rpcId, method: record2.method, payload: record2.payload };
+}
+function rpcId(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return INVALID_REQUEST_RPC_ID;
+  const record2 = value;
+  return typeof record2.rpcId === "string" ? record2.rpcId : INVALID_REQUEST_RPC_ID;
+}
+function errorResponse(rpcId2, error) {
+  return fullResponse(rpcId2, { ok: false, error });
+}
+function fullResponse(rpcId2, result) {
+  return { type: "server-response", rpcId: rpcId2, result };
+}
+function writeJson(res, status, body) {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(body));
+}
+function writeText(res, status, body) {
+  res.writeHead(status);
+  res.end(body);
 }
 export {
   Config,
