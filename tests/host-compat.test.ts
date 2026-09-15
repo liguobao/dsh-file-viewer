@@ -48,9 +48,9 @@ function readProfilePatch(): string {
 
 describe('host RPC compatibility', () => {
   it('passes the rc2 loopback authority policy when registering the channel', () => {
-    const handle = vi.fn((_channel, _handler, options: { authority: string }) => {
+    const handle = vi.fn((_channel, _handler, options?: { authority: string }) => {
       // Mirrors the eager property access in dsh-client-connection 0.1.1-rc.2.
-      expect(options.authority).toBe('loopback')
+      expect(options?.authority).toBe('loopback')
       return async () => {}
     })
 
