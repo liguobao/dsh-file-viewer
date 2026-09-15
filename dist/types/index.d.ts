@@ -33,7 +33,7 @@ export interface HostConnectionLike {
         headers: IncomingHttpHeaders;
     }): number | undefined;
     rpc: {
-        handle(channel: string, handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>, options: {
+        handle(channel: string, handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>, options?: {
             authority: 'loopback' | 'trusted-host';
         }): () => Promise<void>;
     };

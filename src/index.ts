@@ -60,10 +60,11 @@ export interface HostConnectionLike {
     handle(
       channel: string,
       handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>,
-      // DSH 0.1.1-rc.2 requires this policy argument. DSH 0.1.2-rc.1
-      // authenticates every registered channel and safely ignores the extra
-      // JavaScript argument, so always passing it keeps both hosts compatible.
-      options: { authority: 'loopback' | 'trusted-host' },
+      // DSH <=0.1.5 accepted an optional authority policy. DSH 0.1.6
+      // authenticates registered channels by default and removed that
+      // parameter from the public type; retain it as an optional compatibility
+      // argument for older hosts.
+      options?: { authority: 'loopback' | 'trusted-host' },
     ): () => Promise<void>
   }
 }
